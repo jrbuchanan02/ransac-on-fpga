@@ -6,17 +6,17 @@ module lfsr#(
         input logic rng_clock,
         input logic rng_reset,
         input logic read_clock,
-        output logic [31:0] random_value
+        output logic [63:0] random_value
     );
 
     logic [63:0] r;
 
-    (* ASYNC_REG = "TRUE" *) reg [31:0] sync_regs[2:0];
+    (* ASYNC_REG = "TRUE" *) reg [63:0] sync_regs[2:0];
 
     assign random_value = sync_regs[2];
 
     always_ff @(posedge read_clock) begin
-        sync_regs[0] <= r[31:0];
+        sync_regs[0] <= r[63:0];
         for (int i = 0; i < 2; i++) begin
             sync_regs[i+1] <= sync_regs[i];
         end

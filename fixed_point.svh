@@ -28,6 +28,41 @@ package ransac_fixed;
     endfunction : one
 
 
+    // rough guess as to a number near 1 / sqrt(a)
+    // only valid for a > 0.
+    function fixed_t rsqrt_initial_guess(input fixed_t a);
+        int unsigned lzc;
+        int signed i;
+        fixed_t log2_est;
+        fixed_t log2_rsqrt_est;
+        fixed_t rsqrt_est;
+    begin
+        // log base 2 of a number kind of follows 
+        // the leading zero count
+        for (i = value_bits() - 1; i > -1; i--) begin
+            if (a[i] == 0) begin
+                lzc++;
+            end else begin
+                break;
+            end
+        end
+
+        log2_est = $signed(lzc) - integral_bits;
+        log2_rsqrt_est = -log2_est >>> 1;
+
+        // go backwards to exponentiate the estimate
+
+        rsqrt_est = one();
+
+        if (log2_rsqrt_est < 0) begin
+            rsqrt_initial_guess = rsqrt_est >>> -log2_rsqrt_est;
+        end else begin
+            rsqrt_initial_guess = rsqrt_est << log2_rsqrt_est;
+        end
+        rsqrt_initial_guess = rsqrt_est;
+    end
+    endfunction : rsqrt_initial_guess
+
     typedef struct packed {
         fixed_t x;
         fixed_t y;

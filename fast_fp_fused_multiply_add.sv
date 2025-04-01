@@ -41,8 +41,9 @@ module fast_fp_fused_multiply_add#(
     ransac_fixed::product_t adjusted_product;
     ransac_fixed::fixed_t multiply_result;
 
-    assign adjusted_product = multiply_stages[multiply_latency-1].product >>> ransac_fixed::fraction_bits;
-    assign multiply_result = adjusted_product[ransac_fixed::value_bits()-1:0];
+    //assign adjusted_product = multiply_stages[multiply_latency-1].product >>> ransac_fixed::fraction_bits;
+    //assign multiply_result = adjusted_product[ransac_fixed::value_bits()-1:0];
+    assign multiply_result = multiply_stages[multiply_latency-1].product[ransac_fixed::value_bits()+ransac_fixed::fraction_bits-1-:ransac_fixed::value_bits()];
 
     fp_add_sub#(
         .external_pipeline(external_pipeline),
@@ -87,7 +88,9 @@ module fast_fp_fused_multiply_add#(
         endcase
 
         for (int i = 0; i < multiply_latency - 1; i++) begin
-            multiply_stages[i+1] <= multiply_stages[i];
+            multiply_stages[i+1].product <= multiply_stages[i].product;
+            multiply_stages[i+1].c <= multiply_stages[i].c;
+            multiply_stages[i+1].external <= multiply_stages[i].external;
         end
     end
 

@@ -40,6 +40,6 @@ module fast_point_distance_to_plane#(
         .dot_product(distance_but_possibly_negative)
     );
 
-    assign distance = distance_but_possibly_negative < 0 ? -distance_but_possibly_negative : distance_but_possibly_negative;
+    assign distance = (distance_but_possibly_negative < 0) ? -distance_but_possibly_negative : distance_but_possibly_negative;
 
 endmodule : fast_point_distance_to_plane

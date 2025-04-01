@@ -26,42 +26,72 @@ module fast_vector_dot_product#(
     typedef struct {
         ransac_fixed::vector3f_t lhs;
         ransac_fixed::vector3f_t rhs;
+        ransac_fixed::fixed_t off;
         external_pipeline external;
     } pipeline_stage_t;
 
-    // 0 -> x
-    // 1 -> y
-    // 2 -> z
-    // 3 -> output from z
-    pipeline_stage_t to_stage[2:0];
-    ransac_fixed::fixed_t dot[2:0];
-    
-    assign to_stage[0].lhs = lhs;
-    assign to_stage[0].rhs = rhs;
-    assign dot[0] = off;
-    assign to_stage[0].external = pipeline_i;
+    pipeline_stage_t in_to_x;
+    pipeline_stage_t x_to_y;
+    pipeline_stage_t y_to_z;
+    pipeline_stage_t z_to_out;
 
-    assign dot_product = dot[2];
-    assign pipeline_o = to_stage[2].external;
+    ransac_fixed::fixed_t x;
+    ransac_fixed::fixed_t y;
+    ransac_fixed::fixed_t z;
 
-    genvar i;
-    generate
-        for(i = 1; i < 3; i++) begin
-            fast_fp_fused_multiply_add#(
-                .multiply_latency(multiply_latency),
-                .addition_has_latency(addition_has_latency),
-                .external_pipeline(pipeline_stage_t)
-            ) fma(
-                .clock(clock),
-                .a(i == 1 ? to_stage[i - 1].lhs.x : i == 2 ? to_stage[i - 1].lhs.y : to_stage[i - 1].lhs.z),
-                .b(i == 1 ? to_stage[i - 1].rhs.x : i == 2 ? to_stage[i - 1].rhs.y : to_stage[i - 1].rhs.z),
-                .c(dot[i - 1]),
-                .opcode(ransac_fixed::FMA_OPCODE_POS_A_POS_C),
-                .r(dot[i]),
-                .pipeline_i(to_stage[i - 1]),
-                .pipeline_o(to_stage[i])
-            );
-        end
-    endgenerate
+    always_comb begin : assign_in_to_x
+        in_to_x.lhs <= lhs;
+        in_to_x.rhs <= rhs;
+        in_to_x.off <= off;
+        in_to_x.external <= pipeline_i;
+    end : assign_in_to_x
+
+    fast_fp_fused_multiply_add#(
+        .external_pipeline(pipeline_stage_t),
+        .multiply_latency(multiply_latency),
+        .addition_has_latency(addition_has_latency)
+    ) x_part (
+        .clock(clock),
+        .opcode(ransac_fixed::FMA_OPCODE_POS_A_POS_C),
+        .a(in_to_x.lhs.x),
+        .b(in_to_x.rhs.x),
+        .c(in_to_x.off),
+        .pipeline_i(in_to_x),
+        .r(x),
+        .pipeline_o(x_to_y)
+    );
+
+    fast_fp_fused_multiply_add#(
+        .external_pipeline(pipeline_stage_t),
+        .multiply_latency(multiply_latency),
+        .addition_has_latency(addition_has_latency)
+    ) y_part (
+        .clock(clock),
+        .opcode(ransac_fixed::FMA_OPCODE_POS_A_POS_C),
+        .a(x_to_y.lhs.y),
+        .b(x_to_y.rhs.y),
+        .c(x),
+        .pipeline_i(x_to_y),
+        .r(y),
+        .pipeline_o(y_to_z)
+    );
+
+    fast_fp_fused_multiply_add#(
+        .external_pipeline(pipeline_stage_t),
+        .multiply_latency(multiply_latency),
+        .addition_has_latency(addition_has_latency)
+    ) z_part (
+        .clock(clock),
+        .opcode(ransac_fixed::FMA_OPCODE_POS_A_POS_C),
+        .a(y_to_z.lhs.z),
+        .b(y_to_z.rhs.z),
+        .c(y),
+        .pipeline_i(y_to_z),
+        .r(z),
+        .pipeline_o(z_to_out)
+    );
+
+    assign dot_product = z;
+    assign pipeline_o = z_to_out.external;
 
 endmodule : fast_vector_dot_product

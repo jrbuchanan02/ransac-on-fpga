@@ -130,7 +130,7 @@ module newtons_method_rsqrt#(
     end
 
     slow_fp_fused_multiply_add#(
-        .multiply_latency(multiply_latency),
+        .latency(multiply_latency),
         .reset_polarity(reset_polarity)
     ) fma(
         .clock(clock),
