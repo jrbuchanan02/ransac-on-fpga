@@ -37,7 +37,9 @@ module slow_vector_dot_product#(
         IDLE,
         FMA_X,  // set up vars for x component
         FMA_WAIT_X, // wait on x component, set up vars for y component
+        FMA_INIT_Y, // wait one more cycle on y component
         FMA_WAIT_Y, // wait on y component, set up vars for z compoennt
+        FMA_INIT_Z, // wait one more cycle on z component
         FMA_WAIT_Z  // wait on z component
     } state;
 
@@ -89,10 +91,18 @@ module slow_vector_dot_product#(
                 c <= fma_r;
                 if (fma_output_valid) begin
                     fma_input_valid <= 1;
-                    state <= FMA_WAIT_Y;
+                    state <= FMA_INIT_Y;
                 end else begin
                     fma_input_valid <= 0;
                 end
+            end
+            
+            FMA_INIT_Y: begin
+                a <= stored_vars.lhs.y;
+                b <= stored_vars.rhs.y;
+                c <= fma_r;
+                fma_input_valid <= 1;
+                state <= FMA_WAIT_Y;
             end
 
             FMA_WAIT_Y: begin
@@ -101,10 +111,18 @@ module slow_vector_dot_product#(
                 c <= fma_r;
                 if (fma_output_valid) begin
                     fma_input_valid <= 1;
-                    state <= FMA_WAIT_Z;
+                    state <= FMA_INIT_Z;
                 end else begin
                     fma_input_valid <= 0;
                 end
+            end
+
+            FMA_INIT_Z: begin
+                a <= stored_vars.lhs.z;
+                b <= stored_vars.rhs.z;
+                c <= fma_r;
+                fma_input_valid <= 1;
+                state <= FMA_WAIT_Z;
             end
 
             FMA_WAIT_Z: begin

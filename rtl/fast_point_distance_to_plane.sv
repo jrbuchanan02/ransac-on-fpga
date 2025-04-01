@@ -11,8 +11,7 @@
 
 module fast_point_distance_to_plane#(
         parameter type external_pipeline = logic,
-        parameter int unsigned multiply_latency = ransac_fixed::value_bits() / 8,
-        parameter bit addition_has_latency = 1
+        parameter int unsigned multiply_latency = ransac_fixed::value_bits() / 8
     )(
         input logic clock,
 
@@ -28,8 +27,7 @@ module fast_point_distance_to_plane#(
 
     fast_vector_dot_product#(
         .external_pipeline(external_pipeline),
-        .multiply_latency(multiply_latency),
-        .addition_has_latency(addition_has_latency)
+        .multiply_latency(multiply_latency)
     ) dot_product(
         .clock(clock),
         .lhs(point),

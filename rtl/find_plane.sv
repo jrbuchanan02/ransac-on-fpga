@@ -91,10 +91,14 @@ module find_plane#(
     enum {
         IDLE,
         FIND_V1_V2,
+        CROSS_PRODUCT_INIT_STALL,
         FIND_NONNORMAL_N_WAIT,
+        FIND_NONNORMAL_N_DETECT_SQUARED_MAGNITUDE_OVERFLOW,
+        FIND_N_DOT_N_STALL,
         FIND_N_DOT_N_WAIT,
         RSQRT_N_DOT_N_ITERATE_INIT,
         RSQRT_N_DOT_N_ITERATE_WAIT,
+        RSQRT_N_DOT_N_ITERATE_NEXT,
         RSQRT_N_DOT_N_ITERATE,
         RSQRT_NORMALIZE_N_X_WAIT,
         RSQRT_NORMALIZE_N_Y_WAIT,
@@ -139,20 +143,45 @@ module find_plane#(
                 v2.y <= stored_vars.a.y - stored_vars.c.y;
                 v2.z <= stored_vars.a.z - stored_vars.c.z;
 
-                state <= FIND_NONNORMAL_N_WAIT;
+                state <= CROSS_PRODUCT_INIT_STALL;
 
                 cross_product_input_valid <= 1;
+            end
+            
+            CROSS_PRODUCT_INIT_STALL: begin
+                cross_product_input_valid <= 1;
+                state <= FIND_NONNORMAL_N_WAIT;
             end
 
             FIND_NONNORMAL_N_WAIT: begin
                 cross_product_input_valid <= 0;
                 n <= cross_product_res;
                 if (cross_product_output_valid) begin
-                    state <= FIND_N_DOT_N_WAIT;
-                    squared_magnitude_input_valid <= 1;
+                    state <= FIND_NONNORMAL_N_DETECT_SQUARED_MAGNITUDE_OVERFLOW;
                 end else begin
                     squared_magnitude_input_valid <= 0;
                 end
+            end
+            
+            FIND_NONNORMAL_N_DETECT_SQUARED_MAGNITUDE_OVERFLOW: begin
+                if ( n.x[ransac_fixed::value_bits() - 2] != n.x[ransac_fixed::value_bits() - 1] ||
+                     n.y[ransac_fixed::value_bits() - 2] != n.y[ransac_fixed::value_bits() - 1] ||
+                     n.z[ransac_fixed::value_bits() - 2] != n.z[ransac_fixed::value_bits() - 1] ||
+                     n.x[ransac_fixed::value_bits() - 3] != n.x[ransac_fixed::value_bits() - 1] ||
+                     n.y[ransac_fixed::value_bits() - 3] != n.y[ransac_fixed::value_bits() - 1] ||
+                     n.z[ransac_fixed::value_bits() - 3] != n.z[ransac_fixed::value_bits() - 1]) begin
+                    
+                    n.x <= n.x / 8;
+                    n.y <= n.y / 8;
+                    n.z <= n.z / 8;  
+                end 
+                state <= FIND_N_DOT_N_STALL;
+                squared_magnitude_input_valid <= 1;
+            end
+            
+            FIND_N_DOT_N_STALL: begin
+                state <= FIND_N_DOT_N_WAIT;
+                squared_magnitude_input_valid <= 1;
             end
 
             FIND_N_DOT_N_WAIT: begin
@@ -182,6 +211,12 @@ module find_plane#(
                 end
             end
 
+            RSQRT_N_DOT_N_ITERATE_NEXT: begin
+                rsqrt_input_valid <= 1;
+                rsqrt_old_guess <= rsqrt_new_guess;
+                state <= RSQRT_N_DOT_N_ITERATE_WAIT;
+            end
+
             RSQRT_N_DOT_N_ITERATE: begin
                 if (rsqrt_iteration_number == rsqrt_iterations) begin
                     // set up normalization multiply with X component
@@ -189,9 +224,10 @@ module find_plane#(
                     fma_b <= n.x;
                     fma_c <= 0;
                     fma_input_valid <= 1;
+                    state <= RSQRT_NORMALIZE_N_X_WAIT;
                 end else begin
                     rsqrt_input_valid <= 1;
-                    state <= RSQRT_N_DOT_N_ITERATE_WAIT;
+                    state <= RSQRT_N_DOT_N_ITERATE_NEXT;
                 end
             end
 

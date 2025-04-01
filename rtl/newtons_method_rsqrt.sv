@@ -41,7 +41,9 @@ module newtons_method_rsqrt#(
         IDLE,
         FMA_INIT,   // a = x, b = g, c = 0
         FMA_WAIT0,  // a = fma.r, b = g, c = 1 (in fixed_t!); wait until previous fma finishes before starting next one
+        FMA_STALL,  // wait one cycle between WAIT0 and WAIT1 (because for some reason output_valid on the FMA is too slow?)
         FMA_WAIT1,  // a = fma.r, b = g, c = 0; wait until previous fma finishes before starting next one
+        FMA_STALL2, // again wait one cycle between wait1 and wait2
         FMA_WAIT2   // wait on fma, new_guess = fma.r >>> 1
     } state;
 
@@ -97,10 +99,18 @@ module newtons_method_rsqrt#(
 
                 if (fma_output_valid) begin
                     fma_input_valid <= 1;
-                    state <= FMA_WAIT1;
+                    state <= FMA_STALL;
                 end else begin
                     fma_input_valid <= 0;
                 end
+            end
+
+            FMA_STALL: begin
+                fma_a <= fma_r;
+                fma_b <= stored_vars.guess;
+                fma_c <= ransac_fixed::one();
+                fma_input_valid <= 1;
+                state <= FMA_WAIT1;
             end
 
             FMA_WAIT1: begin
@@ -110,10 +120,18 @@ module newtons_method_rsqrt#(
 
                 if (fma_output_valid) begin
                     fma_input_valid <= 1;
-                    state <= FMA_WAIT2;
+                    state <= FMA_STALL2;
                 end else begin
                     fma_input_valid <= 0;
                 end
+            end
+            
+            FMA_STALL2: begin
+                fma_a <= fma_r;
+                fma_b <= stored_vars.guess;
+                fma_c <= 0;
+                fma_input_valid <= 1;
+                state <= FMA_WAIT2;
             end
 
             FMA_WAIT2: begin
@@ -122,6 +140,8 @@ module newtons_method_rsqrt#(
                 if (fma_output_valid) begin
                     state <= IDLE;
                     new_guess <= fma_r >>> 1;
+                    output_valid <= 1;
+                    input_ready <= 1;
                 end
             end
 

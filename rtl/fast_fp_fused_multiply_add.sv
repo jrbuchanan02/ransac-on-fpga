@@ -16,8 +16,7 @@
 
 module fast_fp_fused_multiply_add#(
         parameter type external_pipeline = logic,
-        parameter int unsigned multiply_latency = ransac_fixed::value_bits() / 8,
-        parameter bit addition_has_latency = 1
+        parameter int unsigned multiply_latency = ransac_fixed::value_bits() / 8
     )(
         input logic clock,
         input ransac_fixed::fma_opcode_t opcode,
@@ -30,11 +29,12 @@ module fast_fp_fused_multiply_add#(
         output external_pipeline pipeline_o
     );
 
-    typedef struct {
+    typedef struct packed {
         ransac_fixed::product_t product;
         ransac_fixed::fixed_t c;
-        external_pipeline external;
     } multiply_stage_t;
+    
+    external_pipeline external_stages[multiply_latency-1:0];
 
     multiply_stage_t multiply_stages[multiply_latency-1:0];
 
@@ -45,22 +45,12 @@ module fast_fp_fused_multiply_add#(
     //assign multiply_result = adjusted_product[ransac_fixed::value_bits()-1:0];
     assign multiply_result = multiply_stages[multiply_latency-1].product[ransac_fixed::value_bits()+ransac_fixed::fraction_bits-1-:ransac_fixed::value_bits()];
 
-    fp_add_sub#(
-        .external_pipeline(external_pipeline),
-        .any_latency(addition_has_latency)
-    ) add_part(
-        .clock(clock),
-        .lhs(multiply_result),
-        .rhs(multiply_stages[multiply_latency-1].c),
-        .subtract(0),
-        .pipeline_i(multiply_stages[multiply_latency-1].external),
-
-        .res(r),
-        .pipeline_o(pipeline_o)
-    );
+    assign pipeline_o = external_stages[multiply_latency-1];
+    
+    assign r = multiply_result + multiply_stages[multiply_latency-1].c;
 
     always_ff @(posedge clock) begin
-        multiply_stages[0].external <= pipeline_i;
+        external_stages[0] <= pipeline_i;
 
         case (opcode)
 
@@ -90,7 +80,7 @@ module fast_fp_fused_multiply_add#(
         for (int i = 0; i < multiply_latency - 1; i++) begin
             multiply_stages[i+1].product <= multiply_stages[i].product;
             multiply_stages[i+1].c <= multiply_stages[i].c;
-            multiply_stages[i+1].external <= multiply_stages[i].external;
+            external_stages[i+1] <= external_stages[i];
         end
     end
 

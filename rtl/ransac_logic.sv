@@ -1,7 +1,9 @@
 `timescale 1ns/1ps
 
 // ransac_logic: given some memory of points, outputs a plane to describe the ground plane
-// according to a random sample consensus
+//according to a random sample consensus
+
+`include "fixed_point.svh"
 
 // a note on how this logic works:
 //
@@ -9,7 +11,6 @@
 //    logic here (should) be smart enough to ignore the nonexistent point received.
 module ransac_logic#(
         parameter int unsigned point_pipeline_multiply_latency = ransac_fixed::value_bits() / 8,
-        parameter bit point_pipeline_addition_has_latency = 1,
         parameter int unsigned plane_calculate_multiply_latency = ransac_fixed::value_bits() / 16,
         parameter int unsigned rsqrt_iterations = 100,
         parameter bit reset_polarity = 1,
@@ -140,6 +141,7 @@ module ransac_logic#(
                     ransac_point_addrs[i] <= raw_rng[i][$clog2(max_point_count)-1:0];
                 end
                 submitted_pipeline_i.point_exists <= 0;
+                state <= LOAD_PLANE_POINT_A_INIT;
             end
             LOAD_PLANE_POINT_A_INIT: begin
                 find_plane_input_valid <= 0;
@@ -298,8 +300,7 @@ module ransac_logic#(
 
     fast_point_distance_to_plane#(
         .external_pipeline(pipeline_t),
-        .multiply_latency(point_pipeline_multiply_latency),
-        .addition_has_latency(point_pipeline_addition_has_latency)
+        .multiply_latency(point_pipeline_multiply_latency)
     ) distance_to_plane_test(
         .clock(clock),
         .point(submitted_test_point),

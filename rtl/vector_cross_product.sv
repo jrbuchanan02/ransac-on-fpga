@@ -30,6 +30,7 @@ module vector_cross_product#(
     enum {
         IDLE,
         INIT_FMA_FIRST_COMPONENT,
+        FMA_FIRST_COMPONENT_STALL,
         WAIT_FMA_FIRST_COMPONENT,
         INIT_FMA_SECOND_COMPONENT,
         WAIT_FMA_SECOND_COMPONENT
@@ -85,7 +86,7 @@ module vector_cross_product#(
 
 
             INIT_FMA_FIRST_COMPONENT: begin
-                for (int i = 0; i < 2; i++) begin
+                for (int i = 0; i < 3; i++) begin
                     c[i] <= 0;
                     inputs_valid[i] <= 1;
                 end
@@ -101,6 +102,14 @@ module vector_cross_product#(
                 opcode[1] <= ransac_fixed::FMA_OPCODE_POS_A_NEG_C;
                 opcode[2] <= ransac_fixed::FMA_OPCODE_POS_A_NEG_C;
 
+                state <= FMA_FIRST_COMPONENT_STALL;
+            end
+            
+            FMA_FIRST_COMPONENT_STALL: begin
+                for (int i = 0; i < 3; i++) begin
+                    c[i] <= 0;
+                    inputs_valid[i] <= 1;
+                end
                 state <= WAIT_FMA_FIRST_COMPONENT;
             end
 

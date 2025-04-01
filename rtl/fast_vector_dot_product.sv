@@ -7,8 +7,7 @@
 
 module fast_vector_dot_product#(
         parameter type external_pipeline = logic,
-        parameter int unsigned multiply_latency = ransac_fixed::value_bits() / 8,
-        parameter bit addition_has_latency = 1
+        parameter int unsigned multiply_latency = ransac_fixed::value_bits() / 8
     )(
         input logic clock,
 
@@ -48,8 +47,7 @@ module fast_vector_dot_product#(
 
     fast_fp_fused_multiply_add#(
         .external_pipeline(pipeline_stage_t),
-        .multiply_latency(multiply_latency),
-        .addition_has_latency(addition_has_latency)
+        .multiply_latency(multiply_latency)
     ) x_part (
         .clock(clock),
         .opcode(ransac_fixed::FMA_OPCODE_POS_A_POS_C),
@@ -63,8 +61,7 @@ module fast_vector_dot_product#(
 
     fast_fp_fused_multiply_add#(
         .external_pipeline(pipeline_stage_t),
-        .multiply_latency(multiply_latency),
-        .addition_has_latency(addition_has_latency)
+        .multiply_latency(multiply_latency)
     ) y_part (
         .clock(clock),
         .opcode(ransac_fixed::FMA_OPCODE_POS_A_POS_C),
@@ -78,8 +75,7 @@ module fast_vector_dot_product#(
 
     fast_fp_fused_multiply_add#(
         .external_pipeline(pipeline_stage_t),
-        .multiply_latency(multiply_latency),
-        .addition_has_latency(addition_has_latency)
+        .multiply_latency(multiply_latency)
     ) z_part (
         .clock(clock),
         .opcode(ransac_fixed::FMA_OPCODE_POS_A_POS_C),
