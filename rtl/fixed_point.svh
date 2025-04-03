@@ -4,7 +4,7 @@
 
 package ransac_fixed;
     
-    localparam int unsigned integral_bits = 8;
+    localparam int unsigned integral_bits = 24;
     localparam int unsigned fraction_bits = 24;
 
     function int value_bits(); 

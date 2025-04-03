@@ -35,11 +35,11 @@ module newtons_method_rsqrt#(
         output logic output_valid,
         output ransac_fixed::fixed_t new_guess
     );
-
+    
 
     enum {
         IDLE,
-        FMA_INIT,   // a = x, b = g, c = 0
+        FMA_INIT,   // a = -x, b = g, c = 0
         FMA_WAIT0,  // a = fma.r, b = g, c = 1 (in fixed_t!); wait until previous fma finishes before starting next one
         FMA_STALL,  // wait one cycle between WAIT0 and WAIT1 (because for some reason output_valid on the FMA is too slow?)
         FMA_WAIT1,  // a = fma.r, b = g, c = 0; wait until previous fma finishes before starting next one
@@ -85,7 +85,7 @@ module newtons_method_rsqrt#(
             end
 
             FMA_INIT: begin
-                fma_a <= stored_vars.number;
+                fma_a <= -stored_vars.number;
                 fma_b <= stored_vars.guess;
                 fma_c <= 0;
                 fma_input_valid <= 1;
@@ -93,9 +93,9 @@ module newtons_method_rsqrt#(
             end
 
             FMA_WAIT0: begin
-                fma_a <= fma_r;
+                fma_a <= -stored_vars.number;
                 fma_b <= stored_vars.guess;
-                fma_c <= ransac_fixed::one();
+                fma_c <= 3 * ransac_fixed::one();
 
                 if (fma_output_valid) begin
                     fma_input_valid <= 1;
@@ -108,7 +108,7 @@ module newtons_method_rsqrt#(
             FMA_STALL: begin
                 fma_a <= fma_r;
                 fma_b <= stored_vars.guess;
-                fma_c <= ransac_fixed::one();
+                fma_c <= 3 * ransac_fixed::one();
                 fma_input_valid <= 1;
                 state <= FMA_WAIT1;
             end
@@ -146,6 +146,23 @@ module newtons_method_rsqrt#(
             end
 
             endcase
+        end
+        
+        // simulation only error checking
+        
+        if (new_guess !== 'bx && new_guess < 0) begin
+            $error("Negative guess for 1 / sqrt(x)!");
+            $finish;
+        end
+        
+        if (old_guess !== 'bx && old_guess < 0) begin
+            $error("Negative initial guess for 1 / sqrt(x)");
+            $finish;
+        end
+        
+        if (number !== 'bx && number <= 0) begin
+            $error("Attempt to take 1 / sqrt of a negative number");
+            $finish;
         end
     end
 

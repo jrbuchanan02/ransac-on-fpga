@@ -90,6 +90,11 @@ module simulation_top_level;
                 end
             end
             endcase
+            
+            // workaround to prevent integer overflow in multiplication
+            example_cloud[i].x >>>= 24;
+            example_cloud[i].y >>>= 24;
+            example_cloud[i].z >>>= 24;
         end
 
         // finished preparing the points, start the calculation

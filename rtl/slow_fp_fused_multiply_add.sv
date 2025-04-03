@@ -114,13 +114,54 @@ module slow_fp_fused_multiply_add#(
                 output_valid <= 1;
                 input_ready <= 1;
                 state <= IDLE;
+                
+                stored_vars.b <= b;
+
+                case (opcode)
+
+                ransac_fixed::FMA_OPCODE_POS_A_POS_C: begin
+                    stored_vars.a <= a;
+                    stored_vars.c <= c;
+                end
+
+                ransac_fixed::FMA_OPCODE_POS_A_NEG_C: begin
+                    stored_vars.a <= a;
+                    stored_vars.c <= -c;
+                end
+
+                ransac_fixed::FMA_OPCODE_NEG_A_POS_C: begin
+                    stored_vars.a <= -a;
+                    stored_vars.c <= c;
+                end
+
+                ransac_fixed::FMA_OPCODE_NEG_A_NEG_C: begin
+                    stored_vars.a <= -a;
+                    stored_vars.c <= -c;
+                end
+
+                endcase
+                
+                // overflow check
+                
+                if (stored_vars.a < 0 && stored_vars.b < 0 || stored_vars.a > 0 && stored_vars.b > 0) begin
+                    if (a_times_b < 0) begin
+                        $error("Integer overflow detected");
+                        $finish;
+                    end
+                end else if (a_times_b > 0) begin
+                    if (a_times_b < 0) begin
+                        $error("Integer overflow detected");
+                        $finish;
+                    end
+                end
             end
 
             endcase
         end
     end
 
-    assign adjusted_product = product >>> ransac_fixed::fraction_bits;
-    assign a_times_b = adjusted_product[ransac_fixed::value_bits()-1:0];
+//    assign adjusted_product = product >>> ransac_fixed::fraction_bits;
+//    assign a_times_b = adjusted_product[ransac_fixed::value_bits()-1:0];
 
+    assign a_times_b = product[ransac_fixed::value_bits()+ransac_fixed::fraction_bits-1:ransac_fixed::fraction_bits];
 endmodule : slow_fp_fused_multiply_add
