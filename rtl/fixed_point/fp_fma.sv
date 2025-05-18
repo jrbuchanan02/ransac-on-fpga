@@ -12,8 +12,7 @@ module fp_fma#(
 
         input logic [ibits+fbits-1:0] a,
         input logic [ibits+fbits-1:0] b,
-        input logic [ibits+fbits-1:0] c,
-        input logic c_is_signed,
+        input logic [2*(ibits+fbits)-1:0] c,
 
         // 2 * width of a, b, or c to prevent overflow on multiplication
         // 1 more bit to prevent overflow on addition
@@ -41,7 +40,7 @@ module fp_fma#(
 
     typedef struct packed {
         double_t ab;
-        double_t cprime;
+        double_t c;
 
         logic [id_bits-1:0] id;
 
@@ -52,8 +51,6 @@ module fp_fma#(
     stage_s stages[latency-1:0];
 
     // some combinatorial things
-
-    assign ovalid = stages[latency-1].valid;
 
     logic pipeline_should_advance;
     // pipeline should advance when the stage we're outputting is invalid
@@ -69,8 +66,11 @@ module fp_fma#(
         end
     end
 
-    assign r = stages[latency-1].ab + stages[latency-1].cprime;
-    assign oid = stages[latency-1].id;
+    always @(posedge clock) begin : update_outputs
+        ovalid <= stages[latency-1].valid;
+        r <= stages[latency-1].ab + stages[latency-1].c;
+        oid <= stages[latency-1].id;
+    end : update_outputs
 
     always @(posedge clock) begin
         if (reset == reset_polarity) begin
@@ -87,14 +87,8 @@ module fp_fma#(
                 iready <= 1;
 
                 // special case for stage 0
-                stages[0].ab <= a * b;
-                stages[0].cprime[0+:fbits] <= 0;
-                stages[0].cprime[fbits+:bits_in_single] <= c;
-                if (c_is_signed) begin
-                    stages[0].cprime[fbits+bits_in_single+:ibits] <= {ibits{c[bits_in_single-1]}};
-                end else begin
-                    stages[0].cprime[fbits+bits_in_single+:ibits] <= '0;
-                end
+                stages[0].ab <= $signed(a) * $signed(b);
+                stages[0].c <= c;
                 stages[0].id <= iid;
                 stages[0].valid <= ivalid;
 

@@ -1,0 +1,271 @@
+`timescale 1ns/1fs
+
+`include "vectors/vector_pkg.svh"
+
+function automatic real random_real_between(input real lo, input real hi);
+    int unsigned rng_result = $random();
+    real result_from_zero_to_one; 
+    real result; begin
+    
+    result_from_zero_to_one = rng_result / ($pow(2, 32) - 1);
+    
+    if (0 > result_from_zero_to_one || 1 < result_from_zero_to_one) begin
+        $error("Random value from 0 to 1 out of range");
+        $finish();
+    end
+
+    result = (result_from_zero_to_one * (hi - lo)) + lo;
+    
+    if (result < lo || result > hi) begin
+        $error("Random value from %f to %f out of range: %f", lo, hi, result);
+        $finish();
+    end
+    random_real_between = result;
+    
+end
+endfunction
+
+function real dot_product(input real ax, input real ay, input real az, input real bx, input real by, input real bz); begin
+    dot_product = ax * bx + ay * by + az * bz;
+end
+endfunction
+
+function real absolute_value(input real x); begin
+    if (x < 0) absolute_value = -x;
+    else absolute_value = x;
+end
+endfunction
+
+typedef struct {
+    real as_float;
+    vector::single_t as_single;
+    vector::double_t as_double;
+} real_and_fixed_s;
+
+function real_and_fixed_s real_to_fixed(input real value);
+    real temp;
+    real conv_temp;
+    real also_value;
+    real_and_fixed_s scratchpad; begin
+    
+    scratchpad.as_float = value;
+    also_value = value;
+
+    if (value < 0) begin
+        also_value = -also_value;
+    end
+
+    scratchpad.as_single = '0;
+    scratchpad.as_double = '0;
+
+    // we actually start at one beyond the largest valid bit
+    // (remember we used signed fixed point values)
+    conv_temp = also_value;
+    for (int unsigned i = vector::bits_in_single; i > 0; i--) begin : convert_single
+        temp = $pow(2.0, i - 2.0 - vector::single_fbits);
+        if (conv_temp >= temp) begin
+            scratchpad.as_single[i - 2] = 1;
+            conv_temp -= temp;
+        end
+    end : convert_single
+
+    conv_temp = also_value;
+    for (int unsigned i = vector::bits_in_double; i > 0; i--) begin : convert_double
+        temp = $pow(2, i - 2 - vector::double_fbits);
+        if (conv_temp >= temp) begin
+            scratchpad.as_double[i - 2] = 1;
+            conv_temp -= temp;
+        end
+    end : convert_double
+
+    if (value < 0) begin
+        scratchpad.as_single = -scratchpad.as_single;
+        scratchpad.as_double = -scratchpad.as_double;
+    end
+    real_to_fixed = scratchpad;
+end
+endfunction : real_to_fixed
+
+module tb_check_inlier_unit;
+
+    // threshold as a real
+    localparam real threshold_as_real = 0.25;
+
+    // minimum x bounds
+    localparam real min_x = -10;
+    // minimum y bounds
+    localparam real min_y = -10;
+    // minimum z bounds
+    localparam real min_z = -10;
+    
+    // maximum x bounds
+    localparam real max_x = +10;
+    // maximum y bounds
+    localparam real max_y = +10;
+    // maximum z bounds
+    localparam real max_z = +10;
+
+    // number of simulated points to generate
+    // (approx. 1 million)
+    localparam int unsigned point_count = 1 << 20;
+
+    // list of randomly generated points in a point cloud
+    // 1/2 of these points will be generated as inliers
+    // the rest as outliers
+    real cloud_x[point_count-1:0];
+    real cloud_y[point_count-1:0];
+    real cloud_z[point_count-1:0];
+
+    struct {
+        real x;
+        real y;
+        real z;
+    } plane_n_as_real;
+    real plane_d_as_real;
+
+    initial begin : derive_plane
+        
+        // other planes should be tested
+        // but also remember that without seeding the rng properly,
+        // a plane generated with $random will be the same one every
+        // time the simulation runs.
+        plane_n_as_real.x = 0;
+        plane_n_as_real.y = 1;
+        plane_n_as_real.z = 0;
+
+        plane_d_as_real = 0;
+
+    end : derive_plane
+
+    initial begin : generate_points
+        // generate every other point as an inlier
+        for (int unsigned i = 0; i < point_count; i++) begin
+            if (i & 1) begin
+                // inlier
+                
+                cloud_x[i] = random_real_between(min_x, max_x);
+                cloud_y[i] = random_real_between(-threshold_as_real, +threshold_as_real);
+                cloud_z[i] = random_real_between(min_z, max_z);
+                
+            end else begin
+                // outlier (could happen to be an inlier)
+
+                cloud_x[i] = random_real_between(min_x, max_x);
+                cloud_y[i] = random_real_between(min_y, max_y);
+                cloud_z[i] = random_real_between(min_z, max_z);
+
+            end
+        end
+    end : generate_points
+
+    logic clock;
+    logic reset;
+    logic ivalid;
+    logic iready;
+    vector::vector3s_s n;
+    vector::vector3s_s p;
+    vector::single_t d;
+    vector::single_t t;
+    logic ovalid;
+    logic oacknowledge;
+    logic inlier;
+
+    // use the default parameters
+    check_inlier_unit dut(
+        .clock(clock),
+        .reset(reset),
+        .ivalid(ivalid),
+        .iready(iready),
+        .n(n),
+        .p(p),
+        .d(d),
+        .t(t),
+        .ovalid(ovalid),
+        .oacknowledge(oacknowledge),
+        .inlier(inlier)
+    );
+
+    initial begin : generate_clock_signal
+        clock = 0;
+        forever begin : clock_loop
+            #5; // equiv. to a 100MHz clock rate
+            clock <= ~clock;
+        end : clock_loop
+    end : generate_clock_signal
+
+    initial begin : manage_reset
+        reset = 1;
+        #50;
+        reset = 0;
+    end : manage_reset
+    
+    int unsigned point_to_test = 0;
+    
+    real true_distance;
+
+    always @(posedge clock) begin : actually_test
+        n.v.x = real_to_fixed(plane_n_as_real.x).as_single;
+        n.v.y = real_to_fixed(plane_n_as_real.y).as_single;
+        n.v.z = real_to_fixed(plane_n_as_real.z).as_single;
+        d = real_to_fixed(plane_d_as_real).as_single;
+        t = real_to_fixed(threshold_as_real).as_single;
+        ivalid = 0;
+        oacknowledge = 1;
+        if (!reset) begin : test_logic
+            // if ovalid is set, check the input
+            // otherwise, if iready is set, provide new input
+            // if neither are set, then do nothing
+
+            if (ovalid && !iready) begin : verify_result
+                true_distance = absolute_value(
+                    dot_product(
+                        plane_n_as_real.x,
+                        plane_n_as_real.y,
+                        plane_n_as_real.z,
+                        cloud_x[point_to_test],
+                        cloud_y[point_to_test],
+                        cloud_z[point_to_test]) - plane_d_as_real
+                ) / $sqrt(
+                    dot_product(
+                        plane_n_as_real.x,
+                        plane_n_as_real.y,
+                        plane_n_as_real.z,
+                        plane_n_as_real.x,
+                        plane_n_as_real.y,
+                        plane_n_as_real.z
+                    )
+                );
+                if (threshold_as_real >= true_distance) begin : should_be_inlier
+                    if (inlier) begin
+                        $display("Point %d correctly labeled inlier", point_to_test);
+                    end 
+                    else begin
+                        $error("Point %d incorrectly labeled as outlier: distance is %f", point_to_test, true_distance);
+                        $finish();
+                    end
+                end : should_be_inlier
+                else begin : should_not_be_inlier
+                    if (inlier) begin
+                        $error("Point %d incorrectly labeled as inlier: distance is %f", point_to_test, true_distance);
+                        $finish();
+                    end
+                    else begin
+                        $display("Point %d correctly labeled outlier", point_to_test);
+                    end
+                end : should_not_be_inlier
+                point_to_test++;
+                if (point_to_test >= point_count) begin : check_if_done
+                    $display("Finished");
+                    $finish();
+                end : check_if_done
+            end : verify_result
+            else if (iready) begin : provide_new_input
+                ivalid = 1;
+                p.v.x = real_to_fixed(cloud_x[point_to_test]).as_single;
+                p.v.y = real_to_fixed(cloud_y[point_to_test]).as_single;
+                p.v.z = real_to_fixed(cloud_z[point_to_test]).as_single;
+            end : provide_new_input
+        end : test_logic
+    end : actually_test
+
+endmodule : tb_check_inlier_unit
