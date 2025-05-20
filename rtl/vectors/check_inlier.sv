@@ -1,15 +1,15 @@
-`timescale 1ns / 1fs
+`timescale 1ns / 1ps
 
 `include "vectors/vector_pkg.svh"
 
 // checks if a point lies within some plane given multiple cycles to do so.
 //
-// the check inlier unit module is designed such that in the future it might use
-// multiple fma units for its calculations and / or the fma unit might output
-// results in a variable number of cycles or even out of order.
-// it should be noted, however, that only one, two, or (marginally) three 
-// instances of the "small" fma unit will offer any speedup.
-module check_inlier_unit#(
+// the check_inlier module is designed such that in the future it might process
+// multiple points at a time (reasonably two or three per small_fma instance)
+// and that the fma units may at some future point output their results in a 
+// variable number of cycles or even out of order (e.g., multiplication 
+// operations ending early)
+module check_inlier#(
         parameter int unsigned latency_small_fma = vector::fma_latency_singles,
         parameter int unsigned latency_large_fma = vector::fma_latency_doubles,
         parameter bit reset_polarity = 1)(
@@ -19,7 +19,7 @@ module check_inlier_unit#(
         input logic ivalid,
         output logic iready,
         input vector::vector3s_s n,
-        input vector::vector3s_s p,
+        input vector::point_t p,
         input vector::single_t d,
         input vector::single_t t,
 
@@ -197,6 +197,12 @@ module check_inlier_unit#(
         first_layer_calculation[FIRST_LAYER_N_DOT_P_X].b_input = CAPTURED_INPUT_PX;
     end : assign_constants
 
+    vector::double_t d_as_double;
+    
+    always_comb begin
+        d_as_double = (captured_inputs[CAPTURED_INPUT_D] <<< (double_fbits - single_fbits));
+    end
+
     always @(posedge clock) begin : main_logic
 
         // if reset occurs
@@ -278,7 +284,7 @@ module check_inlier_unit#(
                             // everything else uses the result of the required calculation as the c-input.
                             if (first_layer_calculation[i].depends_on == FIRST_LAYER_NULL_CALCULATION) begin
                                 // special case for first component of finding n * p - d
-                                small_fma.c = (i == FIRST_LAYER_N_DOT_P_Z) ? (-captured_inputs[CAPTURED_INPUT_D] << (double_fbits - single_fbits)) : '0;
+                                small_fma.c = (i == FIRST_LAYER_N_DOT_P_Z) ? -d_as_double : '0;
                             end else begin
                                 small_fma.c = first_layer_calculation[first_layer_calculation[i].depends_on].result;
                             end
@@ -423,11 +429,5 @@ module check_inlier_unit#(
         .ovalid(large_fma.ovalid),
         .oacknowledge(large_fma.oacknowledge)
     );
-
-endmodule : check_inlier_unit
-
-// placeholder for a grouping of check_inlier_unit instances
-// which operate mostly in parallel
-module check_inlier#()();
 
 endmodule : check_inlier

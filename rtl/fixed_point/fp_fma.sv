@@ -1,11 +1,12 @@
-`timescale 1ns / 1fs
+`timescale 1ns / 1ps
 
 module fp_fma#(
         parameter bit reset_polarity = 1'b1,
         parameter int unsigned ibits = 12,
         parameter int unsigned fbits = 20,
         parameter int unsigned id_bits = 8,
-        parameter int unsigned latency = 8
+        parameter int unsigned latency = 8,
+        parameter int unsigned add_latency = 0
     )(
         input logic clock,
         input logic reset,
@@ -48,7 +49,9 @@ module fp_fma#(
 
     } stage_s;
 
+
     stage_s stages[latency-1:0];
+
 
     // some combinatorial things
 
@@ -66,11 +69,43 @@ module fp_fma#(
         end
     end
 
-    always @(posedge clock) begin : update_outputs
-        ovalid <= stages[latency-1].valid;
-        r <= stages[latency-1].ab + stages[latency-1].c;
-        oid <= stages[latency-1].id;
-    end : update_outputs
+    // things for if there is an add latency
+
+    generate
+
+    if (add_latency == 0) begin : no_add_latency
+        always @(posedge clock) begin : update_outputs
+            ovalid <= stages[latency-1].valid;
+            r <= $signed(stages[latency-1].ab) + $signed(stages[latency-1].c);
+            oid <= stages[latency-1].id;
+        end : update_outputs
+    end : no_add_latency
+    else begin : manage_add_latency
+        typedef struct packed {
+            result_t r;
+            logic valid;
+            logic [id_bits-1:0] id;
+        } add_stage_s;
+
+        add_stage_s add_stages[add_latency-1:0];
+
+        always @(posedge clock) begin : advance_add_pipeline
+            ovalid <= add_stages[add_latency-1].valid;
+            r <= add_stages[add_latency-1].r;
+            oid <= add_stages[add_latency-1].id;
+
+            if (pipeline_should_advance) begin
+                add_stages[0].valid <= stages[latency-1].valid;
+                add_stages[0].r <= $signed(stages[latency-1].ab) + $signed(stages[latency-1].c);
+                add_stages[0].id <= stages[latency-1].id;
+                for (int unsigned i = 1; i < latency; i++) begin
+                    add_stages[i] <= add_stages[i - 1];
+                end
+            end
+        end : advance_add_pipeline
+    end : manage_add_latency
+
+    endgenerate
 
     always @(posedge clock) begin
         if (reset == reset_polarity) begin

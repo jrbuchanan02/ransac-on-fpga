@@ -1,4 +1,4 @@
-`timescale 1ns / 1fs
+`timescale 1ns / 1ps
 
 // truncates a fixed point number to another fixed point
 // (saturates if the integer part is too great)
@@ -7,6 +7,9 @@
 //
 // note: assumes that the output format is at most as precise
 // as the input format
+//
+// note: this module may be deprecated by adding appropriate functions
+// to vector_pkg.
 module fp_truncate#(
         parameter int unsigned iibits = 24,
         parameter int unsigned ifbits = 40,

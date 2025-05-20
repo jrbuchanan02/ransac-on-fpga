@@ -1,4 +1,4 @@
-`timescale 1ns/1fs
+`timescale 1ns/1ps
 
 `include "vectors/vector_pkg.svh"
 
@@ -86,7 +86,7 @@ function real_and_fixed_s real_to_fixed(input real value);
 end
 endfunction : real_to_fixed
 
-module tb_check_inlier_unit;
+module tb_check_inlier;
 
     // threshold as a real
     localparam real threshold_as_real = 0.25;
@@ -123,17 +123,59 @@ module tb_check_inlier_unit;
     } plane_n_as_real;
     real plane_d_as_real;
 
+    logic [1:0] chosen_coordinate;
+
+    // seed the RNG
+    // don't care about the unix epoch overflow since I want
+    // the simulation results to use different inputs at t = n
+    // versus t = n + 1
+    int unsigned unix_timestamp_as_int;
+    int file_pointer;
+    int unsigned discard;
+    initial begin : seed_rng
+    // for whatever reason Vivado runs $system in cmd.exe
+    // and not in something with the usual commands that work
+    // everywhere else (e.g., Powershell, Bash, xterm)
+    //
+    // and Vivado even has a linux version!
+//        $system("date +%s > unix_timestamp");
+//        file_pointer = $fopen("unix_timestamp", "r");
+//        void'($fscanf(file_pointer, "%ud", unix_timestamp_as_int));
+//        discard = $random(unix_timestamp_as_int);
+//        $fclose(file_pointer);
+
+          discard = $random(32'h1234_5678);
+    end : seed_rng
+
     initial begin : derive_plane
         
         // other planes should be tested
         // but also remember that without seeding the rng properly,
         // a plane generated with $random will be the same one every
         // time the simulation runs.
-        plane_n_as_real.x = 0;
-        plane_n_as_real.y = 1;
-        plane_n_as_real.z = 0;
+        chosen_coordinate = $random() % 3;
+        case (chosen_coordinate)
+        0: begin
+            plane_n_as_real.x = 1;
+            plane_n_as_real.y = 0;
+            plane_n_as_real.z = 0;
+            plane_d_as_real = random_real_between(0.75*min_x, 0.75*max_x);
+        end
+        1: begin
+            plane_n_as_real.x = 0;
+            plane_n_as_real.y = 1;
+            plane_n_as_real.z = 0;
+            plane_d_as_real = random_real_between(0.75*min_y, 0.75*max_y);
+        end
+        2: begin
+            plane_n_as_real.x = 0;
+            plane_n_as_real.y = 0;
+            plane_n_as_real.z = 1;
+            plane_d_as_real = random_real_between(0.75*min_z, 0.75*max_z);
+        end
+        endcase
 
-        plane_d_as_real = 0;
+        
 
     end : derive_plane
 
@@ -143,9 +185,9 @@ module tb_check_inlier_unit;
             if (i & 1) begin
                 // inlier
                 
-                cloud_x[i] = random_real_between(min_x, max_x);
-                cloud_y[i] = random_real_between(-threshold_as_real, +threshold_as_real);
-                cloud_z[i] = random_real_between(min_z, max_z);
+                cloud_x[i] = chosen_coordinate == 0 ? random_real_between(min_x, max_x) : (plane_d_as_real + random_real_between(-threshold_as_real, +threshold_as_real));
+                cloud_y[i] = chosen_coordinate == 1 ? random_real_between(min_y, max_y) : (plane_d_as_real + random_real_between(-threshold_as_real, +threshold_as_real));
+                cloud_z[i] = chosen_coordinate == 2 ? random_real_between(min_z, max_z) : (plane_d_as_real + random_real_between(-threshold_as_real, +threshold_as_real));
                 
             end else begin
                 // outlier (could happen to be an inlier)
@@ -171,7 +213,7 @@ module tb_check_inlier_unit;
     logic inlier;
 
     // use the default parameters
-    check_inlier_unit dut(
+    check_inlier dut(
         .clock(clock),
         .reset(reset),
         .ivalid(ivalid),
@@ -268,4 +310,4 @@ module tb_check_inlier_unit;
         end : test_logic
     end : actually_test
 
-endmodule : tb_check_inlier_unit
+endmodule : tb_check_inlier
