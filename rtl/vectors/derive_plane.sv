@@ -12,7 +12,7 @@
 // defined by n = 0 and d = 0 and status indicates that less than 3 unique points 
 // exist to define the plane.
 module derive_plane#(
-        parameter int unsigned latency_fma = vector::fma_latency_singles,
+        parameter int unsigned latency_fma = vector::fma_latency_doubles,
         parameter int unsigned reset_polarity = 1
     )(
         input logic clock,
