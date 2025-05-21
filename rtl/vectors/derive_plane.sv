@@ -92,7 +92,7 @@ module derive_plane#(
     } variable_state_e;
 
     typedef struct packed {
-        vector::double_t value;
+        vector::quad_t value;
         variable_state_e state;
         struct packed {
             variable_e a;
@@ -105,10 +105,10 @@ module derive_plane#(
     variable_s [26:0] variable;
 
     struct packed {
-        vector::single_t a;
-        vector::single_t b;
-        vector::double_t c;
-        vector::double_t r;
+        vector::double_t a;
+        vector::double_t b;
+        vector::quad_t c;
+        vector::quad_t r;
         logic iready;
         logic ivalid;
         logic ovalid;
@@ -118,8 +118,8 @@ module derive_plane#(
     } fma_control;
 
     typedef struct packed {
-        vector::double_t ivalue;
-        vector::single_t ovalue;
+        vector::quad_t ivalue;
+        vector::double_t ovalue;
     } truncate_control_s;
 
     truncate_control_s truncate_a;
@@ -134,30 +134,10 @@ module derive_plane#(
     logic found_params;
     logic calculations_remain;
 
-    vector::double_t d_absolute_value;
+    vector::quad_t d_absolute_value;
 
     always @(posedge clock) begin : main_logic
-
-        // inputs are special: they aren't technically constants but they are
-        // not calculated either. As such, their state is always "finished"
-        variable[VARIABLE_AX].state = VARIABLE_STATE_FINISHED;
-        variable[VARIABLE_AY].state = VARIABLE_STATE_FINISHED;
-        variable[VARIABLE_AZ].state = VARIABLE_STATE_FINISHED;
-        variable[VARIABLE_BX].state = VARIABLE_STATE_FINISHED;
-        variable[VARIABLE_BY].state = VARIABLE_STATE_FINISHED;
-        variable[VARIABLE_BZ].state = VARIABLE_STATE_FINISHED;
-        variable[VARIABLE_CX].state = VARIABLE_STATE_FINISHED;
-        variable[VARIABLE_CY].state = VARIABLE_STATE_FINISHED;
-        variable[VARIABLE_CZ].state = VARIABLE_STATE_FINISHED;
-        // constants are always calculated and their value is hard-coded
-        variable[VARIABLE_ONE].state = VARIABLE_STATE_FINISHED;
-        variable[VARIABLE_NEG_ONE].state = VARIABLE_STATE_FINISHED;
-        variable[VARIABLE_ZERO].state = VARIABLE_STATE_FINISHED;
-
-        variable[VARIABLE_ONE].value = { {vector::double_ibits - 1{1'b0}}, 1'b0, {vector::double_fbits{1'b0}} };
-        variable[VARIABLE_NEG_ONE].value = -variable[VARIABLE_ONE].value;
-        variable[VARIABLE_ZERO].value = '0;
-
+    
         // default the negate_c flag to "no" for all values (only needed in 
         // the second part of calculating N)
         for (int unsigned i = 0; i < 27; i++) begin
@@ -357,21 +337,33 @@ module derive_plane#(
                 // 12.20 fp, if |d| is above 1024).
                 
                 // continue this adjustment for as many cycles as necessary
-                d_absolute_value = vector::abs_double(variable[VARIABLE_DZ].value);
-                if (d_absolute_value[vector::bits_in_double - 1-:vector::double_ibits] > (1 << (vector::single_ibits - 2))) begin
+                d_absolute_value = vector::abs_quad(variable[VARIABLE_DZ].value);
+                if (d_absolute_value[vector::bits_in_quad - 1-:vector::quad_ibits] > (1 << (vector::single_ibits - 2))) begin
                     variable[VARIABLE_DZ].value  = variable[VARIABLE_DZ].value >>> 1;
                     variable[VARIABLE_NX2].value = variable[VARIABLE_NX2].value >>> 1;
                     variable[VARIABLE_NY2].value = variable[VARIABLE_NY2].value >>> 1;
                     variable[VARIABLE_NZ2].value = variable[VARIABLE_NZ2].value >>> 1;
                 end
                 else begin
-                    n.v.x <= vector::double_to_single(variable[VARIABLE_NX2].value);
-                    n.v.y <= vector::double_to_single(variable[VARIABLE_NY2].value);
-                    n.v.z <= vector::double_to_single(variable[VARIABLE_NZ2].value);
-                    d <= vector::double_to_single(variable[VARIABLE_DZ].value);
+                    n.v.x = vector::double_to_single(vector::quad_to_double(variable[VARIABLE_NX2].value));
+                    n.v.y = vector::double_to_single(vector::quad_to_double(variable[VARIABLE_NY2].value));
+                    n.v.z = vector::double_to_single(vector::quad_to_double(variable[VARIABLE_NZ2].value));
+                    d = vector::double_to_single(vector::quad_to_double(variable[VARIABLE_DZ].value));
                     ovalid <= 1;
                     state <= STATE_IDLE;
+                    
+                    
+                    // if n is (or will be) the 0 vector, then there must have been less than
+                    // 3 unique points.
+                    
+                    if (n.v.x == '0 && n.v.y == '0 && n.v.z == '0) begin
+                        status <= vector::DERIVE_PLANE_STATUS_LESS_THAN_THREE_UNIQUE_POINTS;
+                    end else begin
+                        status <= vector::DERIVE_PLANE_STATUS_SUCCESS;
+                    end
                 end
+                
+                
             end
 
             STATE_IDLE: begin
@@ -380,8 +372,8 @@ module derive_plane#(
                 fma_control.oacknowledge <= 1;
 
                 for (int unsigned i = 0; i < 27; i++) begin
-                    variable[i].state <= VARIABLE_STATE_PENDING;
-                    variable[i].value <= '0;
+                    variable[i].state = VARIABLE_STATE_PENDING;
+                    variable[i].value = '0;
                 end
 
                 if (ovalid && oacknowledge && !iready) begin
@@ -393,20 +385,51 @@ module derive_plane#(
                 end
 
                 // capture inputs on every cycle spent idle
-                variable[VARIABLE_AX].value = $signed(a.v.x) <<< (vector::double_fbits - vector::single_fbits);
-                variable[VARIABLE_AY].value = $signed(a.v.y) <<< (vector::double_fbits - vector::single_fbits);
-                variable[VARIABLE_AZ].value = $signed(a.v.z) <<< (vector::double_fbits - vector::single_fbits);
-                variable[VARIABLE_BX].value = $signed(b.v.x) <<< (vector::double_fbits - vector::single_fbits);
-                variable[VARIABLE_BY].value = $signed(b.v.y) <<< (vector::double_fbits - vector::single_fbits);
-                variable[VARIABLE_BZ].value = $signed(b.v.z) <<< (vector::double_fbits - vector::single_fbits);
-                variable[VARIABLE_CX].value = $signed(c.v.x) <<< (vector::double_fbits - vector::single_fbits);
-                variable[VARIABLE_CY].value = $signed(c.v.y) <<< (vector::double_fbits - vector::single_fbits);
-                variable[VARIABLE_CZ].value = $signed(c.v.z) <<< (vector::double_fbits - vector::single_fbits);
+                variable[VARIABLE_AX].value = $signed(a.v.x);
+                variable[VARIABLE_AY].value = $signed(a.v.y);
+                variable[VARIABLE_AZ].value = $signed(a.v.z);
+                variable[VARIABLE_BX].value = $signed(b.v.x);
+                variable[VARIABLE_BY].value = $signed(b.v.y);
+                variable[VARIABLE_BZ].value = $signed(b.v.z);
+                variable[VARIABLE_CX].value = $signed(c.v.x);
+                variable[VARIABLE_CY].value = $signed(c.v.y);
+                variable[VARIABLE_CZ].value = $signed(c.v.z);
+
+                variable[VARIABLE_AX].value <<<= vector::quad_fbits - vector::single_fbits;
+                variable[VARIABLE_AY].value <<<= vector::quad_fbits - vector::single_fbits;
+                variable[VARIABLE_AZ].value <<<= vector::quad_fbits - vector::single_fbits;
+                variable[VARIABLE_BX].value <<<= vector::quad_fbits - vector::single_fbits;
+                variable[VARIABLE_BY].value <<<= vector::quad_fbits - vector::single_fbits;
+                variable[VARIABLE_BZ].value <<<= vector::quad_fbits - vector::single_fbits;
+                variable[VARIABLE_CX].value <<<= vector::quad_fbits - vector::single_fbits;
+                variable[VARIABLE_CY].value <<<= vector::quad_fbits - vector::single_fbits;
+                variable[VARIABLE_CZ].value <<<= vector::quad_fbits - vector::single_fbits;
             end
 
             endcase
 
         end : state_machine
+        
+                // inputs are special: they aren't technically constants but they are
+        // not calculated either. As such, their state is always "finished"
+        variable[VARIABLE_AX].state = VARIABLE_STATE_FINISHED;
+        variable[VARIABLE_AY].state = VARIABLE_STATE_FINISHED;
+        variable[VARIABLE_AZ].state = VARIABLE_STATE_FINISHED;
+        variable[VARIABLE_BX].state = VARIABLE_STATE_FINISHED;
+        variable[VARIABLE_BY].state = VARIABLE_STATE_FINISHED;
+        variable[VARIABLE_BZ].state = VARIABLE_STATE_FINISHED;
+        variable[VARIABLE_CX].state = VARIABLE_STATE_FINISHED;
+        variable[VARIABLE_CY].state = VARIABLE_STATE_FINISHED;
+        variable[VARIABLE_CZ].state = VARIABLE_STATE_FINISHED;
+        // constants are always calculated and their value is hard-coded
+        variable[VARIABLE_ONE].state = VARIABLE_STATE_FINISHED;
+        variable[VARIABLE_NEG_ONE].state = VARIABLE_STATE_FINISHED;
+        variable[VARIABLE_ZERO].state = VARIABLE_STATE_FINISHED;
+
+        variable[VARIABLE_ONE].value = { {vector::quad_ibits - 1{1'b0}}, 1'b1, {vector::quad_fbits{1'b0}} };
+        variable[VARIABLE_NEG_ONE].value = -variable[VARIABLE_ONE].value;
+        variable[VARIABLE_ZERO].value = '0;
+
     end : main_logic
 
     // connect the wires for fma_control and fma_truncate
@@ -416,10 +439,10 @@ module derive_plane#(
     end : connect_wires
 
     fp_truncate#(
-        .iibits(vector::double_ibits),
-        .ifbits(vector::double_fbits),
-        .oibits(vector::single_ibits),
-        .ofbits(vector::single_fbits),
+        .iibits(vector::quad_ibits),
+        .ifbits(vector::quad_fbits),
+        .oibits(vector::double_ibits),
+        .ofbits(vector::double_fbits),
         .signed_values(1)
     ) fp_truncate_a(
         .ivalue(truncate_a.ivalue),
@@ -427,10 +450,10 @@ module derive_plane#(
     );
 
     fp_truncate#(
-        .iibits(vector::double_ibits),
-        .ifbits(vector::double_fbits),
-        .oibits(vector::single_ibits),
-        .ofbits(vector::single_fbits),
+        .iibits(vector::quad_ibits),
+        .ifbits(vector::quad_fbits),
+        .oibits(vector::double_ibits),
+        .ofbits(vector::double_fbits),
         .signed_values(1)
     ) fp_truncate_b(
         .ivalue(truncate_b.ivalue),
@@ -439,8 +462,8 @@ module derive_plane#(
 
     fp_fma#(
         .reset_polarity(reset_polarity),
-        .ibits(vector::single_ibits),
-        .fbits(vector::single_fbits),
+        .ibits(vector::double_ibits),
+        .fbits(vector::double_fbits),
         .latency(latency_fma),
         .id_bits($bits(fma_control.iid))
     ) fma_unit(

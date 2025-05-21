@@ -2,28 +2,7 @@
 
 `include "vectors/vector_pkg.svh"
 
-function automatic real random_real_between(input real lo, input real hi);
-    int unsigned rng_result = $random();
-    real result_from_zero_to_one; 
-    real result; begin
-    
-    result_from_zero_to_one = rng_result / ($pow(2, 32) - 1);
-    
-    if (0 > result_from_zero_to_one || 1 < result_from_zero_to_one) begin
-        $error("Random value from 0 to 1 out of range");
-        $finish();
-    end
 
-    result = (result_from_zero_to_one * (hi - lo)) + lo;
-    
-    if (result < lo || result > hi) begin
-        $error("Random value from %f to %f out of range: %f", lo, hi, result);
-        $finish();
-    end
-    random_real_between = result;
-    
-end
-endfunction
 
 function real dot_product(input real ax, input real ay, input real az, input real bx, input real by, input real bz); begin
     dot_product = ax * bx + ay * by + az * bz;
@@ -35,56 +14,6 @@ function real absolute_value(input real x); begin
     else absolute_value = x;
 end
 endfunction
-
-typedef struct {
-    real as_float;
-    vector::single_t as_single;
-    vector::double_t as_double;
-} real_and_fixed_s;
-
-function real_and_fixed_s real_to_fixed(input real value);
-    real temp;
-    real conv_temp;
-    real also_value;
-    real_and_fixed_s scratchpad; begin
-    
-    scratchpad.as_float = value;
-    also_value = value;
-
-    if (value < 0) begin
-        also_value = -also_value;
-    end
-
-    scratchpad.as_single = '0;
-    scratchpad.as_double = '0;
-
-    // we actually start at one beyond the largest valid bit
-    // (remember we used signed fixed point values)
-    conv_temp = also_value;
-    for (int unsigned i = vector::bits_in_single; i > 0; i--) begin : convert_single
-        temp = $pow(2.0, i - 2.0 - vector::single_fbits);
-        if (conv_temp >= temp) begin
-            scratchpad.as_single[i - 2] = 1;
-            conv_temp -= temp;
-        end
-    end : convert_single
-
-    conv_temp = also_value;
-    for (int unsigned i = vector::bits_in_double; i > 0; i--) begin : convert_double
-        temp = $pow(2, i - 2 - vector::double_fbits);
-        if (conv_temp >= temp) begin
-            scratchpad.as_double[i - 2] = 1;
-            conv_temp -= temp;
-        end
-    end : convert_double
-
-    if (value < 0) begin
-        scratchpad.as_single = -scratchpad.as_single;
-        scratchpad.as_double = -scratchpad.as_double;
-    end
-    real_to_fixed = scratchpad;
-end
-endfunction : real_to_fixed
 
 module tb_check_inlier;
 
@@ -159,19 +88,19 @@ module tb_check_inlier;
             plane_n_as_real.x = 1;
             plane_n_as_real.y = 0;
             plane_n_as_real.z = 0;
-            plane_d_as_real = random_real_between(0.75*min_x, 0.75*max_x);
+            plane_d_as_real = vector::random_real_between(0.75*min_x, 0.75*max_x);
         end
         1: begin
             plane_n_as_real.x = 0;
             plane_n_as_real.y = 1;
             plane_n_as_real.z = 0;
-            plane_d_as_real = random_real_between(0.75*min_y, 0.75*max_y);
+            plane_d_as_real = vector::random_real_between(0.75*min_y, 0.75*max_y);
         end
         2: begin
             plane_n_as_real.x = 0;
             plane_n_as_real.y = 0;
             plane_n_as_real.z = 1;
-            plane_d_as_real = random_real_between(0.75*min_z, 0.75*max_z);
+            plane_d_as_real = vector::random_real_between(0.75*min_z, 0.75*max_z);
         end
         endcase
 
@@ -185,16 +114,16 @@ module tb_check_inlier;
             if (i & 1) begin
                 // inlier
                 
-                cloud_x[i] = chosen_coordinate == 0 ? random_real_between(min_x, max_x) : (plane_d_as_real + random_real_between(-threshold_as_real, +threshold_as_real));
-                cloud_y[i] = chosen_coordinate == 1 ? random_real_between(min_y, max_y) : (plane_d_as_real + random_real_between(-threshold_as_real, +threshold_as_real));
-                cloud_z[i] = chosen_coordinate == 2 ? random_real_between(min_z, max_z) : (plane_d_as_real + random_real_between(-threshold_as_real, +threshold_as_real));
+                cloud_x[i] = chosen_coordinate == 0 ? vector::random_real_between(min_x, max_x) : (plane_d_as_real + vector::random_real_between(-threshold_as_real, +threshold_as_real));
+                cloud_y[i] = chosen_coordinate == 1 ? vector::random_real_between(min_y, max_y) : (plane_d_as_real + vector::random_real_between(-threshold_as_real, +threshold_as_real));
+                cloud_z[i] = chosen_coordinate == 2 ? vector::random_real_between(min_z, max_z) : (plane_d_as_real + vector::random_real_between(-threshold_as_real, +threshold_as_real));
                 
             end else begin
                 // outlier (could happen to be an inlier)
 
-                cloud_x[i] = random_real_between(min_x, max_x);
-                cloud_y[i] = random_real_between(min_y, max_y);
-                cloud_z[i] = random_real_between(min_z, max_z);
+                cloud_x[i] = vector::random_real_between(min_x, max_x);
+                cloud_y[i] = vector::random_real_between(min_y, max_y);
+                cloud_z[i] = vector::random_real_between(min_z, max_z);
 
             end
         end
@@ -246,11 +175,11 @@ module tb_check_inlier;
     real true_distance;
 
     always @(posedge clock) begin : actually_test
-        n.v.x = real_to_fixed(plane_n_as_real.x).as_single;
-        n.v.y = real_to_fixed(plane_n_as_real.y).as_single;
-        n.v.z = real_to_fixed(plane_n_as_real.z).as_single;
-        d = real_to_fixed(plane_d_as_real).as_single;
-        t = real_to_fixed(threshold_as_real).as_single;
+        n.v.x = vector::real_to_fixed(plane_n_as_real.x).as_single;
+        n.v.y = vector::real_to_fixed(plane_n_as_real.y).as_single;
+        n.v.z = vector::real_to_fixed(plane_n_as_real.z).as_single;
+        d = vector::real_to_fixed(plane_d_as_real).as_single;
+        t = vector::real_to_fixed(threshold_as_real).as_single;
         ivalid = 0;
         oacknowledge = 1;
         if (!reset) begin : test_logic
@@ -303,9 +232,9 @@ module tb_check_inlier;
             end : verify_result
             else if (iready) begin : provide_new_input
                 ivalid = 1;
-                p.v.x = real_to_fixed(cloud_x[point_to_test]).as_single;
-                p.v.y = real_to_fixed(cloud_y[point_to_test]).as_single;
-                p.v.z = real_to_fixed(cloud_z[point_to_test]).as_single;
+                p.v.x = vector::real_to_fixed(cloud_x[point_to_test]).as_single;
+                p.v.y = vector::real_to_fixed(cloud_y[point_to_test]).as_single;
+                p.v.z = vector::real_to_fixed(cloud_z[point_to_test]).as_single;
             end : provide_new_input
         end : test_logic
     end : actually_test
