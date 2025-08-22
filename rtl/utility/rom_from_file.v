@@ -9,7 +9,7 @@ module rom_from_file#(
     input wire [0:addr_width-1] rom_addr,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 rom CLK" *)
     input wire rom_clk,
-    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 rom DIN" *)
+    (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 rom DOUT" *)
     output reg [0:data_width-1] rom_din,
     (* X_INTERFACE_INFO = "xilinx.com:interface:bram:1.0 rom EN" *)
     input wire rom_en,
@@ -17,30 +17,22 @@ module rom_from_file#(
     input wire rom_rst
     );
 
-    reg [0:data_width-1] words [0:word_count-1];
-
-    wire [0:7] bytes[0:(data_width / 8) * word_count - 1];
+    reg [0:7] bytes[0:(data_width / 8) * word_count - 1];
 
     initial begin
-        $readmemh(file, words, 0, addr_width);
+        $readmemh(file, bytes, 0, (data_width / 8) * word_count);
     end
 
     genvar i;
     genvar j;
     generate
-        for(i = 0; i < word_count; i = i + 1) begin
-            for (j = 0; j < data_width / 8; j = j + 1) begin
-                assign bytes[i + j] = words[i][8 * j+:8];
-            end
-        end
-
-        for (j = 0; j < data_width / 8; j = j + 1) begin
+        for (i = 0; i < data_width / 8; i = i + 1) begin
             always @(posedge rom_clk) begin
                 if (rom_en) begin
-                    if (rom_addr + j > word_count) begin
-                        rom_din[8 * j+:8] <= 8'b0;
+                    if (rom_addr + i > word_count) begin
+                        rom_din[8 * i+:8] <= 8'b0;
                     end else begin
-                        rom_din[8 * j+:8] <= bytes[rom_addr + j];
+                        rom_din[8 * i+:8] <= bytes[rom_addr + i];
                     end
                 end
             end
