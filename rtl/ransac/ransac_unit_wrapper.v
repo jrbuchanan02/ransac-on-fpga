@@ -65,6 +65,8 @@ module ransac_unit_wrapper#(
 
     // Note: we do not use the write port but it still has to exist.
     output wire [memory_addr_width-1:0] memory_awaddr,
+    output wire [31:0] memory_awid,
+    output wire [2:0] memory_awprot,
     output wire  memory_awvalid,
     input wire  memory_awready,
 
@@ -72,22 +74,89 @@ module ransac_unit_wrapper#(
     output wire [memory_addr_width-1:0] memory_araddr,
     output wire  memory_arvalid,
     input wire  memory_arready,
+    output wire [2:0] memory_arprot,
+    output wire [31:0] memory_arid,
 
     // Note: we will not use the write port but it still has to exist
     output wire [memory_data_width-1:0] memory_wdata,
     output wire [memory_data_width/8-1:0] memory_wstrb,
+    output wire [31:0] memory_wid,
     output wire  memory_wvalid,
+    output wire memory_wlast,
     input wire  memory_wready,
 
     input wire [memory_data_width-1:0] memory_rdata,
     input wire [1:0] memory_rresp,
     input wire  memory_rvalid,
     output wire  memory_rready,
+    input wire [31:0] memory_rid,
 
     input wire [1:0] memory_bresp,
+    input wire [31:0] memory_bid,
     input wire  memory_bvalid,
-    output wire  memory_bready
+    output wire  memory_bready,
+
+    // signals which aren't required on the requesting side of a full AXI5 port
+    // but are (maybe?) required for AXI-4, at least, definitely required for
+    // vivado
+
+    output wire [7:0] memory_awlen,
+    output wire [7:0] memory_arlen,
+    output wire [2:0] memory_awsize,
+    output wire [2:0] memory_arsize,
+    output wire [3:0] memory_awcache,
+    output wire [3:0] memory_arcache,
+    output wire memory_awlock,
+    output wire memory_arlock,
+    output wire [3:0] memory_awqos,
+    output wire [3:0] memory_arqos
     );
+
+    assign memory_awlen = 0;
+    assign memory_arlen = 0;
+    assign memory_awcache = 4'b0011;
+    assign memory_arcache = 4'b0011;
+    assign memory_arlock = 0;
+    assign memory_awlock = 0;
+    assign memory_awqos = 0;
+    assign memory_arqos = 0;
+    
+    generate
+        case (memory_data_width)
+        8: begin 
+            assign memory_awsize = 3'b000;
+            assign memory_arsize = 3'b000;
+        end
+        16: begin 
+            assign memory_awsize = 3'b001;
+            assign memory_arsize = 3'b001;
+        end
+        32: begin 
+            assign memory_awsize = 3'b010;
+            assign memory_arsize = 3'b010;
+        end
+        64: begin 
+            assign memory_awsize = 3'b011;
+            assign memory_arsize = 3'b011;
+        end
+        128: begin 
+            assign memory_awsize = 3'b100;
+            assign memory_arsize = 3'b100;
+        end
+        256: begin 
+            assign memory_awsize = 3'b101;
+            assign memory_arsize = 3'b101;
+        end
+        512: begin 
+            assign memory_awsize = 3'b110;
+            assign memory_arsize = 3'b110;
+        end
+        1024: begin 
+            assign memory_awsize = 3'b111;
+            assign memory_arsize = 3'b111;
+        end
+        endcase
+    endgenerate
 
     ransac_unit#(
         .memory_addr_width(memory_addr_width),
@@ -133,6 +202,7 @@ module ransac_unit_wrapper#(
         .memory_araddr(memory_araddr),
         .memory_arvalid(memory_arvalid),
         .memory_arready(memory_arready),
+        .memory_arid(memory_arid),
         .memory_wdata(memory_wdata),
         .memory_wstrb(memory_wstrb),
         .memory_wvalid(memory_wvalid),
@@ -141,9 +211,16 @@ module ransac_unit_wrapper#(
         .memory_rresp(memory_rresp),
         .memory_rvalid(memory_rvalid),
         .memory_rready(memory_rready),
+        .memory_rid(memory_rid),
         .memory_bresp(memory_bresp),
         .memory_bvalid(memory_bvalid),
-        .memory_bready(memory_bready)
+        .memory_bready(memory_bready),
+        .memory_awid(memory_awid),
+        .memory_wid(memory_wid),
+        .memory_bid(memory_bid),
+        .memory_awprot(memory_awprot),
+        .memory_arprot(memory_arprot),
+        .memory_wlast(memory_wlast)
     );
 
 endmodule

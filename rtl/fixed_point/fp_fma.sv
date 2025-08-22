@@ -55,6 +55,10 @@ module fp_fma#(
 
     // some combinatorial things
 
+    // set to oacknowledge when no add latency, adder's iready signal when there
+    // is an add latency.
+    logic effective_oready;
+
     logic pipeline_should_advance;
     // pipeline should advance when the stage we're outputting is invalid
     // (either from reset or from stall stage) or when the stage is valid
@@ -62,7 +66,7 @@ module fp_fma#(
     always_comb begin
         if (!stages[latency-1].valid) begin
             pipeline_should_advance = 1;
-        end else if (oacknowledge) begin
+        end else if (effective_oready) begin
             pipeline_should_advance = 1;
         end else begin
             pipeline_should_advance = 0;
@@ -79,30 +83,45 @@ module fp_fma#(
             r <= $signed(stages[latency-1].ab) + $signed(stages[latency-1].c);
             oid <= stages[latency-1].id;
         end : update_outputs
+
+        assign effective_oready = oacknowledge;
     end : no_add_latency
     else begin : manage_add_latency
+
         typedef struct packed {
-            result_t r;
-            logic valid;
             logic [id_bits-1:0] id;
-        } add_stage_s;
+        } adder_metadata_s;
 
-        add_stage_s add_stages[add_latency-1:0];
+        localparam adder_metadata_s adder_id_on_reset = { id: '0 };
 
-        always @(posedge clock) begin : advance_add_pipeline
-            ovalid <= add_stages[add_latency-1].valid;
-            r <= add_stages[add_latency-1].r;
-            oid <= add_stages[add_latency-1].id;
+        adder_metadata_s adder_iid;
+        adder_metadata_s adder_oid;
 
-            if (pipeline_should_advance) begin
-                add_stages[0].valid <= stages[latency-1].valid;
-                add_stages[0].r <= $signed(stages[latency-1].ab) + $signed(stages[latency-1].c);
-                add_stages[0].id <= stages[latency-1].id;
-                for (int unsigned i = 1; i < latency; i++) begin
-                    add_stages[i] <= add_stages[i - 1];
-                end
-            end
-        end : advance_add_pipeline
+        assign adder_iid.id = stages[latency - 1].id;
+        assign oid = adder_oid.id;
+
+        pipelined_adder#(
+            .width(2 * (ibits+fbits)),
+            .latency(add_latency),
+            .metadata_type(adder_metadata_s),
+            .default_metadata(adder_id_on_reset),
+            .reset_polarity(reset_polarity)
+        ) adder(
+            .clock(clock),
+            .reset(reset),
+            .ivalid(stages[latency-1].valid),
+            .iready(effective_oready),
+            .imeta(adder_iid),
+            .lhs(stages[latency-1].ab),
+            .rhs(stages[latency-1].c),
+            .icarry('0),
+            .ovalid(ovalid),
+            .oready(oacknowledge),
+            .ometa(adder_oid),
+            .res(r[2 * (ibits+fbits)-1:0]),
+            .ocarry(r[2 * (ibits + fbits)])
+        );
+
     end : manage_add_latency
 
     endgenerate

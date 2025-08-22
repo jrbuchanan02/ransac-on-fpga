@@ -115,19 +115,24 @@ module ransac_unit#(
 
     // Note: we do not use the write port but it still has to exist.
     output logic [memory_addr_width-1:0] memory_awaddr,
+    output logic [31:0] memory_awid,
     output logic memory_awvalid,
+    output logic [2:0] memory_awprot,
     input logic memory_awready,
 
     // Note: we will heavily use the read port
     output logic [memory_addr_width-1:0] memory_araddr,
     output logic [31:0] memory_arid,
     output logic memory_arvalid,
+    output logic [2:0] memory_arprot,
     input logic memory_arready,
 
     // Note: we will not use the write port but it still has to exist
     output logic [memory_data_width-1:0] memory_wdata,
     output logic [memory_data_width/8-1:0] memory_wstrb,
+    output logic [31:0] memory_wid,
     output logic memory_wvalid,
+    output logic memory_wlast,
     input logic memory_wready,
 
     input logic [memory_data_width-1:0] memory_rdata,
@@ -137,6 +142,7 @@ module ransac_unit#(
     output logic memory_rready,
 
     input logic [1:0] memory_bresp,
+    input logic [31:0] memory_bid,
     input logic memory_bvalid,
     output logic memory_bready
 
@@ -280,6 +286,10 @@ module ransac_unit#(
 
 
     always_comb begin
+        memory_awprot <= 3'b000;    // data, secure, unprivileged
+        memory_arprot <= 3'b000;    // data, secure, unprivileged
+        memory_wlast <= '0; // never writing.
+
         for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
             cloud_read_control.units_pending_read[i] <= plane_checking_unit_port[i].point_addr_valid;
         end
@@ -1014,7 +1024,6 @@ module ransac_unit#(
         control_axi_read_vars.field = address_to_field(control_araddr);
         control_axi_read_vars.field_offset = offset_into_field(control_araddr, control_axi_read_vars.field);
         control_axi_read_vars.read_allowed = field_read_allowed(control_axi_read_vars.field);
-
         
     end : control_axi_decode
 
