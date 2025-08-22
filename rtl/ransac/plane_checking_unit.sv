@@ -37,6 +37,8 @@ module plane_checking_unit#(
         input logic oacknowledge,
         output logic [$clog2(maximum_points):0] inlier_count,
         output ransac::plane_checking_unit_status_e status,
+        output vector::vector3s_s plane_n,
+        output vector::single_t plane_d,
 
         // interface to get points from some external memory
         // if you're familier with AXI, then this structure will
@@ -203,6 +205,8 @@ module plane_checking_unit#(
         logic [$clog2(maximum_points):0] inliers;
         logic [$clog2(maximum_points)-1:0] next_point_offset;
 
+        vector::vector3s_s plane_n;
+        vector::single_t plane_d;
         // variables used within a cycle or that are always combinatorial
         
         // 1 if variables ax through cz are in the READ state
@@ -415,6 +419,9 @@ module plane_checking_unit#(
                         check_inlier_control[i].d = derive_plane_control.d;
                     end
 
+                    check_plane_vars.plane_n = derive_plane_control.n;
+                    check_plane_vars.plane_d = derive_plane_control.d;
+
                     check_plane_state = CHECK_PLANE_STATE_ITERATE_OVER_CLOUD;
                 end
 
@@ -476,6 +483,8 @@ module plane_checking_unit#(
                             status = ransac::PLANE_CHECKING_UNIT_STATUS_SUCCESS;
                             ovalid = '1;
                             inlier_count = check_plane_vars.inliers;
+                            plane_n = check_plane_vars.plane_n;
+                            plane_d = check_plane_vars.plane_d;
                             check_plane_state = CHECK_PLANE_STATE_IDLE;
                         end
                     end

@@ -17,7 +17,7 @@ package vector;
     localparam int unsigned bits_in_quad = quad_ibits + quad_fbits;
 
     localparam int unsigned fma_latency_singles = 4;
-    localparam int unsigned fma_latency_doubles = 6;
+    localparam int unsigned fma_latency_doubles = 16;
     localparam int unsigned fma_latency_quads = 7;
 
     typedef logic signed [single_ibits+single_fbits-1:0] single_t;
@@ -105,6 +105,10 @@ package vector;
         abs_quad = x < 0 ? -x : x;
     endfunction : abs_quad
 
+    function real abs_real(input real x);
+        abs_real = x < 0 ? -x : x;
+    endfunction
+
     function automatic real random_real_between(input real lo, input real hi);
         int unsigned rng_result = $random();
         real result_from_zero_to_one; 
@@ -177,6 +181,7 @@ package vector;
         real_to_fixed = scratchpad;
     end
     endfunction : real_to_fixed
+
 endpackage : vector
 
 `endif // ifndef VECTORS_VECTOR_PKG_SVH

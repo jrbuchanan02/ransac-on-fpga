@@ -17,6 +17,14 @@ package ransac;
         PLANE_CHECKING_UNIT_STATUS_BUS_TIMEOUT
     } plane_checking_unit_status_e;
 
+    typedef enum logic [31:0] {
+        RANSAC_UNIT_STATUS_IDLE_WITHOUT_ERROR,
+        RANSAC_UNIT_STATUS_RUNNING,
+        RANSAC_UNIT_STATUS_IDLE_AFTER_DERIVE_PLANE_ERRORS,
+        RANSAC_UNIT_STATUS_IDLE_AFTER_BUS_ERRORS,
+        RANSAC_UNIT_STATUS_IDLE_AFTER_BUS_TIMEOUTS
+    } ransac_unit_status_e;
+
     typedef enum logic [1:0] {
         AXI_RESP_OKAY,
         AXI_RESP_EXOKAY,

@@ -465,6 +465,7 @@ module derive_plane#(
         .ibits(vector::double_ibits),
         .fbits(vector::double_fbits),
         .latency(latency_fma),
+        .add_latency(0),
         .id_bits($bits(fma_control.iid))
     ) fma_unit(
         .clock(clock),
