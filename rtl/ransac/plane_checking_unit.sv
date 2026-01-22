@@ -243,6 +243,12 @@ module plane_checking_unit#(
     // differentiate a bus error from a bus timeout
     logic [$clog2(maximum_read_latency):0] read_duration;
 
+    always_comb begin
+        inlier_count = check_plane_vars.inliers;
+        plane_n = check_plane_vars.plane_n;
+        plane_d = check_plane_vars.plane_d;
+    end
+
     always @(posedge clock) begin : main_logic
         // update the within-cycle / combinatorial variables
 
@@ -311,7 +317,6 @@ module plane_checking_unit#(
             // ready for input, no valid output
             iready = 1;
             ovalid = 0;
-
             status = ransac::PLANE_CHECKING_UNIT_STATUS_SUCCESS;
         end : handle_reset
 
@@ -330,15 +335,15 @@ module plane_checking_unit#(
                 check_plane_vars.inliers = 0;
                 check_plane_vars.next_point_offset = 0;
                 // capture the point offsets
-                memory_variable[MEMORY_VARIABLE_POINT_A_X_PART].offset = plane_point_start_offsets[0] + 0;
-                memory_variable[MEMORY_VARIABLE_POINT_A_Y_PART].offset = plane_point_start_offsets[0] + 1;
-                memory_variable[MEMORY_VARIABLE_POINT_A_Z_PART].offset = plane_point_start_offsets[0] + 2;
-                memory_variable[MEMORY_VARIABLE_POINT_B_X_PART].offset = plane_point_start_offsets[1] + 0;
-                memory_variable[MEMORY_VARIABLE_POINT_B_Y_PART].offset = plane_point_start_offsets[1] + 1;
-                memory_variable[MEMORY_VARIABLE_POINT_B_Z_PART].offset = plane_point_start_offsets[1] + 2;
-                memory_variable[MEMORY_VARIABLE_POINT_C_X_PART].offset = plane_point_start_offsets[2] + 0;
-                memory_variable[MEMORY_VARIABLE_POINT_C_Y_PART].offset = plane_point_start_offsets[2] + 1;
-                memory_variable[MEMORY_VARIABLE_POINT_C_Z_PART].offset = plane_point_start_offsets[2] + 2;
+                memory_variable[MEMORY_VARIABLE_POINT_A_X_PART].offset = 3 * plane_point_start_offsets[0] + 0;
+                memory_variable[MEMORY_VARIABLE_POINT_A_Y_PART].offset = 3 * plane_point_start_offsets[0] + 1;
+                memory_variable[MEMORY_VARIABLE_POINT_A_Z_PART].offset = 3 * plane_point_start_offsets[0] + 2;
+                memory_variable[MEMORY_VARIABLE_POINT_B_X_PART].offset = 3 * plane_point_start_offsets[1] + 0;
+                memory_variable[MEMORY_VARIABLE_POINT_B_Y_PART].offset = 3 * plane_point_start_offsets[1] + 1;
+                memory_variable[MEMORY_VARIABLE_POINT_B_Z_PART].offset = 3 * plane_point_start_offsets[1] + 2;
+                memory_variable[MEMORY_VARIABLE_POINT_C_X_PART].offset = 3 * plane_point_start_offsets[2] + 0;
+                memory_variable[MEMORY_VARIABLE_POINT_C_Y_PART].offset = 3 * plane_point_start_offsets[2] + 1;
+                memory_variable[MEMORY_VARIABLE_POINT_C_Z_PART].offset = 3 * plane_point_start_offsets[2] + 2;
                 // prepare next point offset too
                 memory_variable[MEMORY_VARIABLE_NEXT_POINT_X_PART].offset = 0;
                 memory_variable[MEMORY_VARIABLE_NEXT_POINT_Y_PART].offset = 1;
@@ -365,6 +370,7 @@ module plane_checking_unit#(
                         memory_variable[i].requests.reset = 0;
                         memory_variable[i].requests.unread = 1;
                     end
+                    iready = 0;
                     check_plane_state = CHECK_PLANE_STATE_AWAIT_PLANE_POINTS;
                 end
             end
@@ -469,7 +475,7 @@ module plane_checking_unit#(
                     // do the calculation in this (kind of strange) order to
                     // ensure that if max_cloud_length is near a power of 2 and 
                     // cloud_length is near the max that next_point_offset never overflows.
-                    if (check_plane_vars.cloud_length - check_plane_vars.next_point_offset >= 6) begin
+                    if (3 * check_plane_vars.cloud_length != check_plane_vars.next_point_offset + 3) begin
                         check_plane_vars.next_point_offset += 3;
                         for (int unsigned i = 0; i < 3; i++) begin
                             memory_variable[i + max_plane_point_index].offset = check_plane_vars.next_point_offset + i;
@@ -482,9 +488,7 @@ module plane_checking_unit#(
                         if (check_plane_vars.all_check_inlier_instances_finished) begin
                             status = ransac::PLANE_CHECKING_UNIT_STATUS_SUCCESS;
                             ovalid = '1;
-                            inlier_count = check_plane_vars.inliers;
-                            plane_n = check_plane_vars.plane_n;
-                            plane_d = check_plane_vars.plane_d;
+                            
                             check_plane_state = CHECK_PLANE_STATE_IDLE;
                         end
                     end

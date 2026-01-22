@@ -271,10 +271,9 @@ module ransac_unit#(
         // - prefer servicing the unit with the lowest score.
         logic [plane_check_unit_count-1:0] [31:0] scoreboard;
         logic [plane_check_unit_count-1:0] units_pending_read;
-        logic [$clog2(plane_check_unit_count)-1:0] smallest_score_pending_read;
-        logic [$clog2(plane_check_unit_count)-1:0] servicing_addr_for_unit;
-        logic [$clog2(plane_check_unit_count)-1:0] servicing_data_for_unit;
-        logic [$clog2(plane_check_unit_count)-1:0] transactions_in_flight;
+        logic [(plane_check_unit_count == 1 ? 0 : ($clog2(plane_check_unit_count)-1)):0] smallest_score_pending_read;
+        logic [(plane_check_unit_count == 1 ? 0 : ($clog2(plane_check_unit_count)-1)):0] servicing_addr_for_unit;
+        logic [(plane_check_unit_count == 1 ? 0 : ($clog2(plane_check_unit_count)-1)):0] transactions_in_flight;
 
         logic decrement_other_scores_on_service;
     } cloud_read_control;
@@ -286,12 +285,12 @@ module ransac_unit#(
 
 
     always_comb begin
-        memory_awprot <= 3'b000;    // data, secure, unprivileged
-        memory_arprot <= 3'b000;    // data, secure, unprivileged
-        memory_wlast <= '0; // never writing.
+        memory_awprot = 3'b000;    // data, secure, unprivileged
+        memory_arprot = 3'b000;    // data, secure, unprivileged
+        memory_wlast = '0; // never writing.
 
         for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
-            cloud_read_control.units_pending_read[i] <= plane_checking_unit_port[i].point_addr_valid;
+            cloud_read_control.units_pending_read[i] = plane_checking_unit_port[i].point_addr_valid;
         end
 
         cloud_read_control.smallest_score_pending_read = '0;
@@ -319,14 +318,14 @@ module ransac_unit#(
             // determine the matching plane checking unit based on the ID.
             for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
                 if (memory_rid == memory_rid_base + i) begin
-                    plane_checking_unit_port[i].point_data_valid <= '1;
+                    plane_checking_unit_port[i].point_data_valid = '1;
                 end else begin
-                    plane_checking_unit_port[i].point_data_valid <= 0;
+                    plane_checking_unit_port[i].point_data_valid = 0;
                 end
             end
         end else begin
             for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
-                plane_checking_unit_port[i].point_data_valid <= '0;
+                plane_checking_unit_port[i].point_data_valid = '0;
             end
         end
     end
@@ -490,11 +489,13 @@ module ransac_unit#(
             // which, if so requested, would start calculations on the next
             // cycle)
             logic [plane_check_unit_count-1:0] iready_state;
+            logic [plane_check_unit_count-1:0] ivalid_state; // units with valid idata
             // units which have valid output
             logic [plane_check_unit_count-1:0] ovalid_state;
             // mask of all conditions required to allow starting a plane checking
             // unit.
             logic [plane_check_unit_count-1:0] allowed_start;
+            logic [plane_check_unit_count-1:0] starting_now; // units starting this cycle.
             logic [plane_check_unit_count-1:0] error_raised;
             // status codes of each unit.
             // for now, if an error occurs, just stop?
@@ -538,31 +539,37 @@ module ransac_unit#(
     always_comb begin : handle_ransac_control_combinatorial
         // wire together various fields.
         for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
-            ransac_control.unit_state.iready_state[i] <= plane_checking_unit_port[i].iready;
-            ransac_control.unit_state.ovalid_state[i] <= plane_checking_unit_port[i].ovalid;
-            ransac_control.unit_state.status[i] <= plane_checking_unit_port[i].status;
-            ransac_control.unit_state.n[i] <= plane_checking_unit_port[i].plane_n;
-            ransac_control.unit_state.d[i] <= plane_checking_unit_port[i].plane_d;
-            ransac_control.unit_state.inliers[i] <= plane_checking_unit_port[i].inlier_count;
+            ransac_control.unit_state.iready_state[i] = plane_checking_unit_port[i].iready;
+            ransac_control.unit_state.ivalid_state[i] = plane_checking_unit_port[i].ivalid;
+            ransac_control.unit_state.ovalid_state[i] = plane_checking_unit_port[i].ovalid;
+            ransac_control.unit_state.status[i] = plane_checking_unit_port[i].status;
+            ransac_control.unit_state.n[i] = plane_checking_unit_port[i].plane_n;
+            ransac_control.unit_state.d[i] = plane_checking_unit_port[i].plane_d;
+            ransac_control.unit_state.inliers[i] = plane_checking_unit_port[i].inlier_count;
         end
 
         // determine which units ended their calculatiion in an error
         for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
-            ransac_control.unit_state.error_raised[i] <= (ransac_control.unit_state.status[i] != ransac::PLANE_CHECKING_UNIT_STATUS_SUCCESS) & ransac_control.unit_state.ovalid_state[i];
+            ransac_control.unit_state.error_raised[i] = (ransac_control.unit_state.status[i] != ransac::PLANE_CHECKING_UNIT_STATUS_SUCCESS) & ransac_control.unit_state.ovalid_state[i];
         end
 
-        // determine the next pending iterations count (current + started - errored)
-        ransac_control.next_pending_iterations <= ransac_control.pending_iterations + $countones(ransac_control.unit_state.allowed_start) - $countones(ransac_control.unit_state.error_raised);
+        // determine if the units are allowed to start.
+        ransac_control.unit_state.allowed_start = {plane_check_unit_count{plane_point_offset_control.all_points_valid}} & ransac_control.unit_state.iready_state;
+        // determine which units are going to start this cycle and (don't?) count them
+        ransac_control.unit_state.starting_now = ransac_control.unit_state.allowed_start & ransac_control.unit_state.ivalid_state;
+
+
+        // determine the number of units which will actually have run iterations
+        // iterations are cancelled on error, so this is not just the number of
+        // iterations which we send off.
+        ransac_control.next_pending_iterations = $countones(ransac_control.unit_state.starting_now) - $countones(ransac_control.unit_state.error_raised);
 
 
         // broadcast various memory variables
         for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
-            plane_checking_unit_port[i].cloud_length <= memory_vars.cloud_length[$clog2(maximum_point_count)-1:0];
-            plane_checking_unit_port[i].threshold <= memory_vars.inlier_threshold[vector::bits_in_single-1:0];
+            plane_checking_unit_port[i].cloud_length = memory_vars.cloud_length[$clog2(maximum_point_count)-1:0];
+            plane_checking_unit_port[i].threshold = memory_vars.inlier_threshold[vector::bits_in_single-1:0];
         end
-
-        // determine if the units are allowed to start.
-        ransac_control.unit_state.allowed_start <= {plane_check_unit_count{plane_point_offset_control.all_points_valid}} & ransac_control.unit_state.iready_state;
 
 
         ransac_control.finished_iteration_summary.best_inlier_count = '0;
@@ -582,12 +589,15 @@ module ransac_unit#(
 
         // might change later, but all outputs should be cleared on the next cycle
         for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
-            plane_checking_unit_port[i].oacknowledge <= '1;
+            plane_checking_unit_port[i].oacknowledge = '1;
         end
 
         // update the processed iterations memory variable (always read only)
-        memory_vars.processed_iterations <= ransac_control.pending_iterations;
+        memory_vars.processed_iterations = ransac_control.pending_iterations;
 
+        memory_vars.derived_plane_distance = ransac_control.best_plane.plane_d;
+        memory_vars.derived_plane_normal = ransac_control.best_plane.plane_n;
+        memory_vars.derived_plane_inlier_count = ransac_control.best_plane.inlier_count;
     end : handle_ransac_control_combinatorial
 
     always_ff @(posedge clock) begin : ransac_control_state_machine
@@ -626,7 +636,8 @@ module ransac_unit#(
                     for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
                         plane_checking_unit_port[i].ivalid <= ransac_control.unit_state.allowed_start[i];
                     end
-                    ransac_control.pending_iterations <= $countones(ransac_control.unit_state.allowed_start);
+                    // ransac_control.pending_iterations <= $countones(ransac_control.unit_state.allowed_start);
+                    ransac_control.pending_iterations <= 0;
                     // clear the previous results.
                     ransac_control.best_plane.inlier_count <= '0;
                     ransac_control.best_plane.plane_n <= '0;
@@ -673,7 +684,7 @@ module ransac_unit#(
                     for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
                         plane_checking_unit_port[i].ivalid <= ransac_control.unit_state.allowed_start[i];
                     end
-                    ransac_control.pending_iterations <= ransac_control.next_pending_iterations;
+                    ransac_control.pending_iterations <= ransac_control.pending_iterations + ransac_control.next_pending_iterations;
 
                     // compare against pending iterations to guarantee that 
                     // AT LEAST the requested number of iterations run
@@ -795,84 +806,84 @@ module ransac_unit#(
         logic write_allowed;
     } control_axi_write_vars;
 
-    // size of a field given its id
-    localparam int unsigned control_field_size[0:13] = '{
-        1,
-        1,
-        1,
-        $bits(memory_vars.cloud_base) / control_data_width,
-        $bits(memory_vars.cloud_length) / control_data_width,
-        $bits(memory_vars.requested_iterations) / control_data_width,
-        $bits(memory_vars.processed_iterations) / control_data_width,
-        word_aligned_width(vector::bits_in_single) / control_data_width,
-        $bits(memory_vars.derived_plane_inlier_count) / control_data_width,
-        word_aligned_width(vector::bits_in_single) / control_data_width,
-        word_aligned_width(vector::bits_in_single) / control_data_width,
-        word_aligned_width(vector::bits_in_single) / control_data_width,
-        word_aligned_width(vector::bits_in_single) / control_data_width,
-        0
-    }; 
+    // // size of a field given its id
+    // localparam int unsigned control_field_size[0:13] = '{
+    //     1,
+    //     1,
+    //     1,
+    //     $bits(memory_vars.cloud_base) / control_data_width,
+    //     $bits(memory_vars.cloud_length) / control_data_width,
+    //     $bits(memory_vars.requested_iterations) / control_data_width,
+    //     $bits(memory_vars.processed_iterations) / control_data_width,
+    //     word_aligned_width(vector::bits_in_single) / control_data_width,
+    //     $bits(memory_vars.derived_plane_inlier_count) / control_data_width,
+    //     word_aligned_width(vector::bits_in_single) / control_data_width,
+    //     word_aligned_width(vector::bits_in_single) / control_data_width,
+    //     word_aligned_width(vector::bits_in_single) / control_data_width,
+    //     word_aligned_width(vector::bits_in_single) / control_data_width,
+    //     0
+    // }; 
 
-    localparam control_port_field_e[0:13] previous_control_field = '{
-        CONTROL_PORT_CALCULATION_START,
-        CONTROL_PORT_CALCULATION_START,
-        CONTROL_PORT_CALCULATION_ABORT,
-        CONTROL_PORT_CALCULATION_STATE,
-        CONTROL_PORT_CLOUD_BASE,
-        CONTROL_PORT_CLOUD_SIZE,
-        CONTROL_PORT_REQUESTED_ITERATIONS,
-        CONTROL_PORT_PROCESSED_ITERATIONS,
-        CONTROL_PORT_INLIER_THRESHOLD,
-        CONTROL_PORT_GROUND_PLANE_INLIER_COUNT,
-        CONTROL_PORT_GROUND_PLANE_NX,
-        CONTROL_PORT_GROUND_PLANE_NY,
-        CONTROL_PORT_GROUND_PLANE_NZ,
-        CONTROL_PORT_NO_FIELD
-    };
+    // localparam control_port_field_e[0:13] previous_control_field = '{
+    //     CONTROL_PORT_CALCULATION_START,
+    //     CONTROL_PORT_CALCULATION_START,
+    //     CONTROL_PORT_CALCULATION_ABORT,
+    //     CONTROL_PORT_CALCULATION_STATE,
+    //     CONTROL_PORT_CLOUD_BASE,
+    //     CONTROL_PORT_CLOUD_SIZE,
+    //     CONTROL_PORT_REQUESTED_ITERATIONS,
+    //     CONTROL_PORT_PROCESSED_ITERATIONS,
+    //     CONTROL_PORT_INLIER_THRESHOLD,
+    //     CONTROL_PORT_GROUND_PLANE_INLIER_COUNT,
+    //     CONTROL_PORT_GROUND_PLANE_NX,
+    //     CONTROL_PORT_GROUND_PLANE_NY,
+    //     CONTROL_PORT_GROUND_PLANE_NZ,
+    //     CONTROL_PORT_NO_FIELD
+    // };
 
-    // keep this up to date with the previous control field function.
-    localparam control_port_field_e highest_offset_field = CONTROL_PORT_GROUND_PLANE_D;
-    // keep this up to date with the previous control field function
-    localparam control_port_field_e lowest_offset_field = CONTROL_PORT_CALCULATION_START;
+    // // keep this up to date with the previous control field function.
+    // localparam control_port_field_e highest_offset_field = CONTROL_PORT_GROUND_PLANE_D;
+    // // keep this up to date with the previous control field function
+    // localparam control_port_field_e lowest_offset_field = CONTROL_PORT_CALCULATION_START;
 
-    localparam logic [0:13][control_addr_width-1:0] control_field_offset = '{
-        0,  // start
-        1,  // abort
-        2,  // state
-        3,  // base
-        3 + control_field_size[CONTROL_PORT_CLOUD_BASE],    // size
-        3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE], // req iterations
-        3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
-            control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS], // proc iterations
-        3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
-            control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
-            control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS], // inlier threshold
-        3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
-            control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
-            control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
-            1 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],    // inlier count
-        3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
-            control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
-            control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
-            control_field_size[CONTROL_PORT_GROUND_PLANE_INLIER_COUNT] + 
-            1 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],     // normal x
-        3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
-            control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
-            control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
-            control_field_size[CONTROL_PORT_GROUND_PLANE_INLIER_COUNT] + 
-            2 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],     // normal y
-        3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
-            control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
-            control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
-            control_field_size[CONTROL_PORT_GROUND_PLANE_INLIER_COUNT] + 
-            3 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],     // normal z
-        3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
-            control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
-            control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
-            control_field_size[CONTROL_PORT_GROUND_PLANE_INLIER_COUNT] + 
-            4 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],     // distance
-        '1    // no field
-    };
+    // localparam logic [0:13][control_addr_width-1:0] control_field_offset = '{
+    //     0,  // start
+    //     1,  // abort
+    //     2,  // state
+    //     3,  // base
+    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE],    // size
+    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE], // req iterations
+    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
+    //         control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS], // proc iterations
+    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
+    //         control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
+    //         control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS], // inlier threshold
+    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
+    //         control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
+    //         control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
+    //         1 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],    // inlier count
+    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
+    //         control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
+    //         control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
+    //         control_field_size[CONTROL_PORT_GROUND_PLANE_INLIER_COUNT] + 
+    //         1 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],     // normal x
+    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
+    //         control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
+    //         control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
+    //         control_field_size[CONTROL_PORT_GROUND_PLANE_INLIER_COUNT] + 
+    //         2 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],     // normal y
+    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
+    //         control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
+    //         control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
+    //         control_field_size[CONTROL_PORT_GROUND_PLANE_INLIER_COUNT] + 
+    //         3 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],     // normal z
+    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
+    //         control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
+    //         control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
+    //         control_field_size[CONTROL_PORT_GROUND_PLANE_INLIER_COUNT] + 
+    //         4 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],     // distance
+    //     '1    // no field
+    // };
 
     // // given a field, determine its offset
     // // the field which lists itself as the previous control field is considered 
@@ -895,50 +906,66 @@ module ransac_unit#(
     // 
     // this condition occurs when address - base_address >= control_field_offset(field)
     // but less than control_field_offset + control_field_size
-    function automatic bit address_refers_to_field(input logic [control_addr_width-1:0] addr, input control_port_field_e field);
-        bit above_minimum;
-        bit below_maximum;
-    begin
-        if (addr >= control_field_offset[field] + control_addr_base) begin
-            above_minimum = '1;
-        end else begin
-            above_minimum = '0;
-        end
+    // function automatic bit address_refers_to_field(input logic [control_addr_width-1:0] addr, input control_port_field_e field);
+    //     bit above_minimum;
+    //     bit below_maximum;
+    // begin
+    //     if (addr >= control_field_offset[field] + control_addr_base) begin
+    //         above_minimum = '1;
+    //     end else begin
+    //         above_minimum = '0;
+    //     end
 
-        if (addr < control_field_offset[field] + control_addr_base + control_field_size[field]) begin
-            below_maximum = '1;
-        end else begin
-            below_maximum = '0;
-        end
+    //     if (addr < control_field_offset[field] + control_addr_base + control_field_size[field]) begin
+    //         below_maximum = '1;
+    //     end else begin
+    //         below_maximum = '0;
+    //     end
 
-        address_refers_to_field = above_minimum & below_maximum;
-    end
-    endfunction : address_refers_to_field
+    //     address_refers_to_field = above_minimum & below_maximum;
+    // end
+    // endfunction : address_refers_to_field
 
-    function automatic control_port_field_e partial_address_lookup(input logic [control_addr_width-1:0] addr, input control_port_field_e starting_field);
-    begin
-        // if the first field to look at matches, then lookup is complete
-        if (address_refers_to_field(addr, starting_field)) begin
-            partial_address_lookup = starting_field;
-        // otherwise, if there is no previous field, then no field matches
-        end else if (starting_field == lowest_offset_field || starting_field == CONTROL_PORT_NO_FIELD) begin
-            partial_address_lookup = CONTROL_PORT_NO_FIELD;
-        end else begin
-        // otherwise, check the previous field to see if it matches.
-            partial_address_lookup = partial_address_lookup(addr, previous_control_field[starting_field]);
-        end
-    end
-    endfunction : partial_address_lookup
+    // function automatic control_port_field_e partial_address_lookup(input logic [control_addr_width-1:0] addr, input control_port_field_e starting_field);
+    // begin
+    //     // if the first field to look at matches, then lookup is complete
+    //     if (address_refers_to_field(addr, starting_field)) begin
+    //         partial_address_lookup = starting_field;
+    //     // otherwise, if there is no previous field, then no field matches
+    //     end else if (starting_field == lowest_offset_field || starting_field == CONTROL_PORT_NO_FIELD) begin
+    //         partial_address_lookup = CONTROL_PORT_NO_FIELD;
+    //     end else begin
+    //     // otherwise, check the previous field to see if it matches.
+    //         partial_address_lookup = partial_address_lookup(addr, previous_control_field[starting_field]);
+    //     end
+    // end
+    // endfunction : partial_address_lookup
 
     function automatic control_port_field_e address_to_field(input logic [control_addr_width-1:0] addr);
     begin
-        address_to_field = partial_address_lookup(addr, highest_offset_field);
+        case ((addr[31:2]))
+        0: address_to_field = CONTROL_PORT_CALCULATION_START;
+        1: address_to_field = CONTROL_PORT_CALCULATION_ABORT;
+        2: address_to_field = CONTROL_PORT_CALCULATION_STATE;
+        3: address_to_field = CONTROL_PORT_CLOUD_BASE;
+        4: address_to_field = CONTROL_PORT_CLOUD_SIZE;
+        5: address_to_field = CONTROL_PORT_REQUESTED_ITERATIONS;
+        6: address_to_field = CONTROL_PORT_PROCESSED_ITERATIONS;
+        7: address_to_field = CONTROL_PORT_INLIER_THRESHOLD;
+        8: address_to_field = CONTROL_PORT_GROUND_PLANE_INLIER_COUNT;
+        9: address_to_field = CONTROL_PORT_GROUND_PLANE_NX;
+        10: address_to_field = CONTROL_PORT_GROUND_PLANE_NY;
+        11: address_to_field = CONTROL_PORT_GROUND_PLANE_NZ;
+        12: address_to_field = CONTROL_PORT_GROUND_PLANE_D;
+        default: address_to_field = CONTROL_PORT_NO_FIELD;
+        endcase
     end
     endfunction : address_to_field
 
     function automatic logic [control_addr_width-1:0] offset_into_field(input logic [control_addr_width-1:0] addr, input control_port_field_e matching_field);
     begin
-        offset_into_field = addr - control_addr_base - control_field_offset[matching_field];
+        // offset_into_field = addr - control_addr_base - control_field_offset[matching_field];
+        offset_into_field = (addr - control_addr_base) & 3;
     end
     endfunction : offset_into_field
 
@@ -966,6 +993,7 @@ module ransac_unit#(
         CONTROL_PORT_GROUND_PLANE_NZ,
         CONTROL_PORT_GROUND_PLANE_D,
         CONTROL_PORT_NO_FIELD: field_write_allowed = '0;
+        // write allowed if not currently running
         CONTROL_PORT_CLOUD_BASE,
         CONTROL_PORT_CLOUD_SIZE,
         CONTROL_PORT_REQUESTED_ITERATIONS,
@@ -1020,8 +1048,12 @@ module ransac_unit#(
     end
     endfunction : read_control_data
 
+    always_comb begin : control_axi_reveal_statistics
+
+    end : control_axi_reveal_statistics
+
     always_comb begin : control_axi_decode
-        control_axi_read_vars.field = address_to_field(control_araddr);
+        control_axi_read_vars.field = address_to_field(control_araddr - control_addr_base);
         control_axi_read_vars.field_offset = offset_into_field(control_araddr, control_axi_read_vars.field);
         control_axi_read_vars.read_allowed = field_read_allowed(control_axi_read_vars.field);
         
@@ -1091,9 +1123,9 @@ module ransac_unit#(
 
             case (control_axi_write_state)
             CONTROL_AXI_WRITE_IDLE: begin
-                control_axi_write_vars.field <= address_to_field(control_awaddr);
+                control_axi_write_vars.field <= address_to_field(control_awaddr - control_addr_base);
                 control_axi_write_vars.field_offset <= offset_into_field(control_awaddr, control_axi_write_vars.field);
-                control_axi_write_vars.write_allowed <= field_write_allowed(control_axi_write_vars.field);
+                control_axi_write_vars.write_allowed <= field_write_allowed(address_to_field(control_awaddr - control_addr_base));
                 if (control_awready && control_awvalid) begin
                     control_awready <= '0;
                     control_wready <= '1;
@@ -1123,7 +1155,9 @@ module ransac_unit#(
                         end
                         CONTROL_PORT_CLOUD_BASE: begin
                             for (int unsigned i = 0; i < control_data_width / 8; i++) begin
-                                if (control_wstrb[i]) memory_vars.cloud_base[control_data_width * control_axi_write_vars.field_offset + 8 * i + 7-:8] <= control_wdata[8*i+7-:8];
+                                if (control_wstrb[i]) begin
+                                    memory_vars.cloud_base[control_data_width * control_axi_write_vars.field_offset + 8 * i + 7-:8] <= control_wdata[8*i+7-:8];
+                                end
                                 // memory_vars.cloud_base[control_data_width - 1 + control_data_width * control_axi_write_vars.field_offset-:control_data_width] <= control_wdata;
                             end
                         end

@@ -283,7 +283,7 @@ module derive_plane#(
                         $fatal(1, "Illegal oid value in derive_plane/fma unit");
                     end
                     else if (variable[fma_control.oid].state != VARIABLE_STATE_RUNNING) begin
-                        $fatal(1, "Illegal oid value in derive_plane/fma unit");
+                        $fatal(1, "Illegal oid value in derive_plane/fma unit. Calculation for variable %d is not currently running. It is in state %d", fma_control.oid, variable[fma_control.oid].state);
                     end
                     else begin
                         // blocking assignments here to allow for the results to be used immediately
@@ -465,8 +465,8 @@ module derive_plane#(
         .ibits(vector::double_ibits),
         .fbits(vector::double_fbits),
         .latency(latency_fma),
-        .add_latency(2),
-        .id_bits($bits(fma_control.iid))
+        .add_latency(0),
+        .id_bits(5)
     ) fma_unit(
         .clock(clock),
         .reset(reset),

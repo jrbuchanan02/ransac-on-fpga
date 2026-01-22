@@ -17,7 +17,7 @@ module pipelined_adder#(
     input logic icarry,
     output logic ovalid,
     input logic oready,
-    output logic ometa,
+    output metadata_type ometa,
     output logic [width-1:0] res,
     output logic ocarry
     );

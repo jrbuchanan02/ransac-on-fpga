@@ -200,7 +200,11 @@ module check_inlier#(
     vector::double_t d_as_double;
     
     always_comb begin
-        d_as_double = (captured_inputs[CAPTURED_INPUT_D] <<< (double_fbits - single_fbits));
+        //d_as_double = (captured_inputs[CAPTURED_INPUT_D] << (double_fbits - single_fbits));
+        d_as_double[double_fbits - single_fbits - 1:0] = 0; // double fraction which does not show up in single
+        d_as_double[double_fbits - 1:double_fbits - single_fbits] = captured_inputs[CAPTURED_INPUT_D][single_fbits-1:0];    // double fraction bits which exist in single
+        d_as_double[double_fbits + single_ibits - 1:double_fbits] = captured_inputs[CAPTURED_INPUT_D][single_fbits + single_ibits - 1:single_fbits]; // integer bits in single and double
+        d_as_double[double_ibits + double_fbits - 1:double_fbits + single_ibits] = captured_inputs[CAPTURED_INPUT_D][single_fbits + single_ibits - 1] ? '1 : '0;    // sign extend.
     end
 
     always @(posedge clock) begin : main_logic
@@ -356,10 +360,12 @@ module check_inlier#(
 
             STATE_IDLE: begin
                 if (ovalid && oacknowledge && !iready) begin
+                    inlier = 0;
                     iready = 1;
                 end else if (ivalid && iready) begin
                     ovalid = 0;
                     iready = 0;
+                    inlier = 0;
                     state <= STATE_FIRST_LAYER_FIND_PARAM;
                 end
                 // always capture inputs on every cycle spent idle

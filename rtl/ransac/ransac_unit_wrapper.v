@@ -29,7 +29,8 @@ module ransac_unit_wrapper#(
         //
         // $random() was considered for the defualt value of this parameter but
         // Vivado synthesis would make $random return 0 for this parameter (which
-        // would place the LFSR in an infinite loop)
+        // would place the LFSR in an infinite loop of constantly reseeding its
+        // state)
         64'h0123_4567_89AB_CDEF
     },
     parameter reg [lfsr_register_width-1:0] lfsr_polynomial = 64'hD800_0000_0000_0000,
