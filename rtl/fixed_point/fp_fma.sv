@@ -130,6 +130,9 @@ module fp_fma#(
         if (reset == reset_polarity) begin
             for (int unsigned i = 0; i < latency; i++) begin
                 stages[i].valid <= 0;
+                stages[i].id <= '0;
+                stages[i].ab <= '0;
+                stages[i].c <= '0;
             end
             iready <= 1;
         end

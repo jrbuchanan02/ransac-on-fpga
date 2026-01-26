@@ -10,8 +10,7 @@
 // variable number of cycles or even out of order (e.g., multiplication 
 // operations ending early)
 module check_inlier#(
-        parameter int unsigned latency_small_fma = vector::fma_latency_singles,
-        parameter int unsigned latency_large_fma = vector::fma_latency_doubles,
+        parameter int unsigned latency_fma = vector::fma_latency_singles,
         parameter bit reset_polarity = 1)(
         input logic clock,
         input logic reset,
@@ -30,410 +29,327 @@ module check_inlier#(
 
     import vector::*;
 
-    // logic which will allow variable latency on the FMA unit and 
-    // allow for the FMA to (in theory) finish operations out of order
+    // variables for the calculation
     //
-    // we have 3 independent calculations until the calculation of our compare bit:
-    // 1. t^2 = t * t + 0
-    // 2. n * n = n.x * n.x + n.y * n.y + n.z * n.z + 0
-    // 3. n * p - d = n.x * p.x + n.y * p.y * n.z * p.z + -d
+    // steps from method.docx, allow FMA to check ahead to reorder calculations:
     //
-    // however, each fma in these calculations depends on the prior calculation
-    //
-    // i.e., we can start the final calculation in n * p - d before the first one in
-    // t^2 finishes, but we have to know the results of all 3 fma's in calculation 3
-    // beforehand
-    //
-    // we can assign each of these fma operations ID's then create a memory which
-    // remembers these ID's and logic which minds their dependencies.
-    // 
-    // t^2 = t * t + 0 is special in that it requires only one fma, so we will say
-    // it depends on no other operation
-    //
-    // calculation 2 is 3 fma's (x, y, and z components) which depend on the prior
-    // one (except for the z component, which has no dependency)
-    // 
-    // calculation 3 has dependencies congruent with calculation 2.
-    // from this perspective, we have 8 dependencies possible:
-    // 1. None
-    // 2. t * t + 0
-    // 3. n.z * n.z + 0
-    // 4. n.y * n.y + (3)
-    // 5. n.x * n.x + (4)
-    // 6. n.z * p.z + -d
-    // 7. n.y * p.y + (6)
-    // 8. n.x * p.x + (7)
-    // the second and third levels of calculation, however, require a separate FMA unit
-    // and must occur in order (the parallelism was fun while it lasted, I guess)
-    // although, once we start the second level calculations, we are ready to start new
-    // first level calculations (potentially we can also optimize s.t. the third level
-    // calculations are also a different set)
-    //
+    // 1. v_1=d*d+0
+	// 2. v_2=n.x*p.x+0
+	// 3. v_3=n.y*p.y+v_2
+	// 4. v_4=n.z*p.z+v_3
+	// 5. v_5=(2*d)*v_4-v_1
+	// 6. v_6=-v_4*v_4+v_5
+	// 7. v_7=n.x*n.x+0
+	// 8. v_8=n.y*n.y+v_7
+	// 9. v_9=n.z*n.z+v_8
+	// 10. v_10=t*t+0
+	// 11. v_11=v_10*v_9+v_6
 
-    // the captured input parameters in our first layer calculations
-    typedef enum logic [2:0] {
-        CAPTURED_INPUT_T,
-        CAPTURED_INPUT_D,
-        CAPTURED_INPUT_NX,
-        CAPTURED_INPUT_NY,
-        CAPTURED_INPUT_NZ,
-        CAPTURED_INPUT_PX,
-        CAPTURED_INPUT_PY,
-        CAPTURED_INPUT_PZ
-    } captured_input_param_e;
+    // one of the values calculated or used as an input in this sequence.
+    typedef enum logic [4:0] {
+        REG_ZERO,   // the constant 0
+        REG_NX,     // x component of n
+        REG_NY,     // y component of n
+        REG_NZ,     // z component of n
+        REG_PX,     // x component of p
+        REG_PY,     // y component of p
+        REG_PZ,     // z component of p
+        REG_D,      // scalar d in plane equation
+        REG_T,      // threshold
+        REG_V1,     // result from step 1
+        REG_V2,     // result from step 2
+        REG_V3,     // result from step 3
+        REG_V4,     // result from step 4
+        REG_V5,     // result from step 5
+        REG_V6,     // result from step 6
+        REG_V7,     // result from step 7
+        REG_V8,     // result from step 8
+        REG_V9,     // result from step 9
+        REG_V10,    // result from step 10
+        REG_V11     // result from step 11. Inlier if this value is valid and not negative
+    } register_e;
 
-    typedef enum logic [2:0] {
-        FIRST_LAYER_NULL_CALCULATION,
-        FIRST_LAYER_FMA_T_T_0,
-        FIRST_LAYER_N_DOT_N_Z,
-        FIRST_LAYER_N_DOT_N_Y,
-        FIRST_LAYER_N_DOT_N_X,
-        FIRST_LAYER_N_DOT_P_Z,
-        FIRST_LAYER_N_DOT_P_Y,
-        FIRST_LAYER_N_DOT_P_X
-    } first_layer_calculation_e;
-
-    typedef enum logic [1:0] {
-        CALCULATION_STATE_PENDING,
-        CALCULATION_STATE_RUNNING,
-        CALCULATION_STATE_FINISHED
-    } calculation_state_e;
-
+    // operation for an FMA in the inlier check
     typedef struct packed {
-        double_t result;
-        calculation_state_e state;
-        first_layer_calculation_e depends_on;
-        captured_input_param_e a_input;
-        captured_input_param_e b_input;
-    } first_layer_calculation_s;
+        register_e dst; // destination register
+        register_e rs1; // lhs of multiplicand
+        register_e rs2; // rhs of multiplicand
+        register_e rs3; // addend
+        logic rs1_shift;    // if set, shift rs1 left once before multiply
+        logic rs1_negate;   // if set, negate rs1 before multiply
+        logic rs3_negate;   // if set, negate rs3 before multiply
+    } fma_op_s;
 
-    // information regarding the first layer of calculations
-    first_layer_calculation_s [7:0] first_layer_calculation;
+    // a register for the calculations
+    typedef struct packed {
+        single_t value; // the value held in the register
+        logic valid;    // set if the value is ready for use by a later calculation
+    } reg_entry_s;
 
-    single_t [7:0] captured_inputs;
+    reg_entry_s [0:19] regs;
 
-    struct packed {
-        single_t a;
-        single_t b;
-        double_t c;
-        double_t r;
-        logic iready;
-        logic ivalid;
-        logic ovalid;
-        logic oacknowledge;
-        logic [2:0] iid;
-        logic [2:0] oid;
-    } small_fma;
+    // FMA sequence. These instructions are pre-reordered to hopefully get a 
+    // good throughput. FMAs are issued if all three inputs are marked valid
+    // and FMA operations are not reordered.
+    // localparam fma_op_s [0:10] fma_sequence = '{
+    //     '{ REG_V2, REG_NX, REG_PX, REG_ZERO, 0, 0, 0 }, // v2 = nx * px + 0
+    //     '{ REG_V1, REG_D, REG_D, REG_ZERO, 0, 0, 0 },   // v1 = d * d + 0
+    //     '{ REG_V3, REG_NY, REG_PY, REG_V2, 0, 0, 0 },   // v3 = ny * py + v2
+    //     '{ REG_V7, REG_NX, REG_NX, REG_ZERO, 0, 0, 0 }, // v7 = nx * nx + 0
+    //     '{ REG_V4, REG_NZ, REG_PZ, REG_V3, 0, 0, 0 },   // v4 = nz * pz + v3 <-- n dot p finished here
+    //     '{ REG_V10, REG_T, REG_T, REG_ZERO, 0, 0, 0 },  // v10 = t * t + 0
+    //     '{ REG_V5, REG_D, REG_V4, REG_V1, 1, 0, 1 },    // v5 = 2d * v4 - v1 <-- 2d(n dot p) - d^2
+    //     '{ REG_V8, REG_NY, REG_NY, REG_V7, 0, 0, 0 },   // v8 = ny * ny + v7
+    //     '{ REG_V6, REG_V4, REG_V4, REG_V5, 0, 1, 0 },   // v6 = -v4 * v4 + v5 <-- -(n dot p)^2 + 2d(n dot p) - d^2
+    //     '{ REG_V9, REG_NZ, REG_NZ, REG_V8, 0, 0, 0 },   // v9 = nz * nz + v8 <-- n dot n finished here
+    //     '{ REG_V11, REG_V10, REG_V9, REG_V6, 0, 0, 1 }  // v11 = v10 * v9 - v6 <-- t^2 * (n dot n) - (n dot p)^2 + 2d(n dot p) - d^2
+    // };
 
-    quad_t n_dot_p_squared;
-    quad_t compare_value;
-
-    struct packed {
-        double_t a;
-        double_t b;
-        quad_t c;
-        quad_t r;
-        logic iready;
-        logic ivalid;
-        logic ovalid;
-        logic oacknowledge;
-        logic iid;
-        logic oid;
-    } large_fma;
-
-    enum logic [2:0] {
-        // idle
-        STATE_IDLE,
-        // find the next first-layer parameter to submit
-        STATE_FIRST_LAYER_FIND_PARAM,
-        // set up params to square (n * p - d)
-        STATE_PREPARE_N_DOT_P_MINUS_D_SQUARED,
-        // submit params to square (n * p - d),
-        // prepare params to submit t^2 (n * n) - (n * p - d) ^ 2
-        STATE_WAIT_N_DOT_P_MINUS_D_SQUARED,
-        // submit t^2 (n * n) - (n * p - d) ^ 2
-        STATE_SUBMIT_FINAL_CALCULATION,
-        // wait on t^2 (n * n) - (n * p - d) ^ 2
-        // once this calculation is done, then go to the idle state.
-        STATE_WAIT_ON_FINAL_CALCULATION,
-        STATE_SETTLE_INLIER_VALUE
-    } state;
-    
-    // "memory bit" used only within the cycle of checking for when
-    // a calculation occurs.
-    logic any_first_layer_calculations_remaining;
-    // "memory bit" used for the parameter finding loop to know if
-    // it should continue looking for a parameter
-    logic still_looking_for_first_layer_params;
-
-    always_comb begin : assign_constants
-        first_layer_calculation[FIRST_LAYER_NULL_CALCULATION].state = CALCULATION_STATE_FINISHED;
-        first_layer_calculation[FIRST_LAYER_NULL_CALCULATION].result = '0;
-
-        first_layer_calculation[FIRST_LAYER_NULL_CALCULATION].depends_on = FIRST_LAYER_NULL_CALCULATION;
-        first_layer_calculation[FIRST_LAYER_FMA_T_T_0].depends_on = FIRST_LAYER_NULL_CALCULATION;
-        first_layer_calculation[FIRST_LAYER_N_DOT_N_Z].depends_on = FIRST_LAYER_NULL_CALCULATION;
-        first_layer_calculation[FIRST_LAYER_N_DOT_N_Y].depends_on = FIRST_LAYER_N_DOT_N_Z;
-        first_layer_calculation[FIRST_LAYER_N_DOT_N_X].depends_on = FIRST_LAYER_N_DOT_N_Y;
-        first_layer_calculation[FIRST_LAYER_N_DOT_P_Z].depends_on = FIRST_LAYER_NULL_CALCULATION;
-        first_layer_calculation[FIRST_LAYER_N_DOT_P_Y].depends_on = FIRST_LAYER_N_DOT_P_Z;
-        first_layer_calculation[FIRST_LAYER_N_DOT_P_X].depends_on = FIRST_LAYER_N_DOT_P_Y;
-
-        first_layer_calculation[FIRST_LAYER_NULL_CALCULATION].a_input = CAPTURED_INPUT_T;   // use as a sort-of null value
-        first_layer_calculation[FIRST_LAYER_NULL_CALCULATION].b_input = CAPTURED_INPUT_T;   // use as a sort-of null vlaue
-        first_layer_calculation[FIRST_LAYER_FMA_T_T_0].a_input = CAPTURED_INPUT_T;
-        first_layer_calculation[FIRST_LAYER_FMA_T_T_0].b_input = CAPTURED_INPUT_T;
-        first_layer_calculation[FIRST_LAYER_N_DOT_N_Z].a_input = CAPTURED_INPUT_NZ;
-        first_layer_calculation[FIRST_LAYER_N_DOT_N_Z].b_input = CAPTURED_INPUT_NZ;
-        first_layer_calculation[FIRST_LAYER_N_DOT_N_Y].a_input = CAPTURED_INPUT_NY;        
-        first_layer_calculation[FIRST_LAYER_N_DOT_N_Y].b_input = CAPTURED_INPUT_NY;
-        first_layer_calculation[FIRST_LAYER_N_DOT_N_X].a_input = CAPTURED_INPUT_NX;
-        first_layer_calculation[FIRST_LAYER_N_DOT_N_X].b_input = CAPTURED_INPUT_NX;
-        first_layer_calculation[FIRST_LAYER_N_DOT_P_Z].a_input = CAPTURED_INPUT_NZ;
-        first_layer_calculation[FIRST_LAYER_N_DOT_P_Z].b_input = CAPTURED_INPUT_PZ;
-        first_layer_calculation[FIRST_LAYER_N_DOT_P_Y].a_input = CAPTURED_INPUT_NY;        
-        first_layer_calculation[FIRST_LAYER_N_DOT_P_Y].b_input = CAPTURED_INPUT_PY;
-        first_layer_calculation[FIRST_LAYER_N_DOT_P_X].a_input = CAPTURED_INPUT_NX;
-        first_layer_calculation[FIRST_LAYER_N_DOT_P_X].b_input = CAPTURED_INPUT_PX;
-    end : assign_constants
-
-    vector::double_t d_as_double;
-    
+    fma_op_s [0:10] fma_sequence;
     always_comb begin
-        //d_as_double = (captured_inputs[CAPTURED_INPUT_D] << (double_fbits - single_fbits));
-        d_as_double[double_fbits - single_fbits - 1:0] = 0; // double fraction which does not show up in single
-        d_as_double[double_fbits - 1:double_fbits - single_fbits] = captured_inputs[CAPTURED_INPUT_D][single_fbits-1:0];    // double fraction bits which exist in single
-        d_as_double[double_fbits + single_ibits - 1:double_fbits] = captured_inputs[CAPTURED_INPUT_D][single_fbits + single_ibits - 1:single_fbits]; // integer bits in single and double
-        d_as_double[double_ibits + double_fbits - 1:double_fbits + single_ibits] = captured_inputs[CAPTURED_INPUT_D][single_fbits + single_ibits - 1] ? '1 : '0;    // sign extend.
+        fma_sequence[0] = '{ REG_V2, REG_NX, REG_PX, REG_ZERO, 0, 0, 0 }; // v2 = nx * px + 0
+        fma_sequence[1] = '{ REG_V1, REG_D, REG_D, REG_ZERO, 0, 0, 0 };   // v1 = d * d + 0
+        fma_sequence[2] = '{ REG_V3, REG_NY, REG_PY, REG_V2, 0, 0, 0 };   // v3 = ny * py + v2
+        fma_sequence[3] = '{ REG_V7, REG_NX, REG_NX, REG_ZERO, 0, 0, 0 }; // v7 = nx * nx + 0
+        fma_sequence[4] = '{ REG_V4, REG_NZ, REG_PZ, REG_V3, 0, 0, 0 };   // v4 = nz * pz + v3 <-- n dot p finished here
+        fma_sequence[5] = '{ REG_V10, REG_T, REG_T, REG_ZERO, 0, 0, 0 };  // v10 = t * t + 0
+        fma_sequence[6] = '{ REG_V5, REG_D, REG_V4, REG_V1, 1, 0, 1 };    // v5 = 2d * v4 - v1 <-- 2d(n dot p) - d^2
+        fma_sequence[7] = '{ REG_V8, REG_NY, REG_NY, REG_V7, 0, 0, 0 };   // v8 = ny * ny + v7
+        fma_sequence[8] = '{ REG_V6, REG_V4, REG_V4, REG_V5, 0, 1, 0 };   // v6 = -v4 * v4 + v5 <-- -(n dot p)^2 + 2d(n dot p) - d^2
+        fma_sequence[9] = '{ REG_V9, REG_NZ, REG_NZ, REG_V8, 0, 0, 0 };   // v9 = nz * nz + v8 <-- n dot n finished here
+        fma_sequence[10] = '{ REG_V11, REG_V10, REG_V9, REG_V6, 0, 0, 0 };  // v11 = v10 * v9 - v6 <-- t^2 * (n dot n) - (n dot p)^2 + 2d(n dot p) - d^2
     end
 
-    always @(posedge clock) begin : main_logic
+    // where we are in the FMA sequence
+    logic [0:3] fma_sequence_position;
 
-        // if reset occurs
-        if (reset == reset_polarity) begin : handle_reset
-            // don't accidentally submit input
-            small_fma.ivalid = 0;
-            large_fma.ivalid = 0;
-            // don't acknowledge the nonexistent input
-            small_fma.oacknowledge = 0;
-            large_fma.oacknowledge = 0;
-            // we haven't calculated anything yet
-            for (int unsigned i = 1; i < 8; i++) begin
-                first_layer_calculation[i].state = CALCULATION_STATE_PENDING;
-                first_layer_calculation[i].result = '0;
+    // port to the fma unit.
+    struct {
+        single_t a; // rs1
+        single_t b; // rs2
+        double_t c; // rs3 as double_t
+        logic [bits_in_double+1-1:0] r; // res as double_t + one more integer bit.
+        register_e iid; // dst reg of submitted calculation
+        register_e oid; // dst reg of most recently finished calculation
+        logic ivalid;   // whether we attempt to submit a calculation this cycle
+        logic iready;   // whether a calculation can be submitted this cycle
+        logic ovalid;   // whether a calculation has finished this cycle
+        logic oacknowledge; // whether we accept a calculation this cycle.
+    } fma_port;
+
+    // we always acknowledge the FMA outputs on the cycle that
+    // they are ready
+    assign fma_port.oacknowledge = 1;
+
+    // port to the fixed point truncation module.
+    // we truncate the result of the fma operation
+    struct {
+        logic [bits_in_double+1-1:0] ivalue;
+        single_t ovalue;
+    } rounding_port;
+
+    // immediately round the fma result to a single_t.
+    assign rounding_port.ivalue = fma_port.r;
+
+    enum {
+        IDLE,   // awaiting valid input and possibly broadcasting a previous valid output. Also capturing inputs on each cycle.
+        CALC   // running calculations
+    } unit_state;
+
+    always_ff @(posedge clock) begin
+        if (reset == reset_polarity) begin
+            for (int unsigned i = 0; i < 20; i++) begin
+                regs[i].value <= '0;
+                regs[i].valid <= '0;
             end
-
-            
-            // go to the idle state, ready for input, invalid output
-            state <= STATE_IDLE;
-            iready = 1;
-            ovalid = 0;
-
-        end : handle_reset
-
-        else begin : state_machine
-
-            case (state)
-
-            STATE_FIRST_LAYER_FIND_PARAM: begin : find_param
-
-                // 1. check if there is a pending result.
-                if (small_fma.ovalid) begin : pending_result_check
-                    // whether or not we use the result, clear it from the small fma unit so we can use it on the next cycle
-                    small_fma.oacknowledge = 1;
-
-                    // check if the result is actually there or if there was some garbage result
-                    // to keep these if statement conditions short, I'm inverting the conditions in this check
-                    // the calculation is valid when:
-                    // 1. its id is not the null calculation
-                    // 2. its id corresponds to a calculation which is currently running
-                    // 3. its dependency has finished (which should always be the case when a calculation is running).
-                    if (small_fma.oid == FIRST_LAYER_NULL_CALCULATION) begin : invalid_because_we_dont_do_the_null_calculation
-                    end : invalid_because_we_dont_do_the_null_calculation
-                    else if (first_layer_calculation[small_fma.oid].state != CALCULATION_STATE_RUNNING) begin : invalid_because_we_werent_expecting_this_id
-                    end : invalid_because_we_werent_expecting_this_id
-                    else if (first_layer_calculation[first_layer_calculation[small_fma.oid].depends_on].state != CALCULATION_STATE_FINISHED) begin : invalid_because_this_calculation_cannot_start
-                    end : invalid_because_this_calculation_cannot_start
-                    else begin : valid_result_found
-                        first_layer_calculation[small_fma.oid].result = small_fma.r;
-                        first_layer_calculation[small_fma.oid].state = CALCULATION_STATE_FINISHED;
-                    end : valid_result_found
-                end : pending_result_check
-
-                // 2. determine which calculation we can do, choose the first available one we find.
-                
-                // if there won't be any more parameters, be sure not to re-submit any
-                small_fma.ivalid = 0;
-                still_looking_for_first_layer_params = 1;
-                for (int unsigned i = 1; i < 8; i++) begin : find_first_layer_params_loop
-                    // oops! actually can't calculate!
-                    if (!small_fma.iready) begin
-                        still_looking_for_first_layer_params = 0;
+            unit_state <= IDLE;
+            iready <= 1;
+            ovalid <= 0;
+            inlier <= 0;
+            fma_sequence_position <= 0;
+            fma_port.a <= '0;
+            fma_port.b <= '0;
+            fma_port.c <= '0;
+            fma_port.ivalid <= '0;
+            fma_port.iid <= REG_ZERO;
+        end else begin
+            case (unit_state)
+            IDLE: begin : proc_idle
+                // handle iready.
+                // we are not ready until output is acknowledged.
+                if (ovalid && !oacknowledge) begin
+                    iready <= 0;
+                end else if (ovalid && oacknowledge) begin
+                    iready <= 1;
+                    ovalid <= 0;    // output has been read
+                    inlier <= 0;    // somewhere else, the code seems to expect that
+                                    // inlier is only set when there is an inlier?
+                end else if (!ovalid) begin
+                    // if statement since we can actually start a calculation
+                    // on this cycle and iready should only be driven once.
+                    if (!iready) begin
+                        iready <= 1;
                     end
-                    // only start a calculation which hasn't been submitted yet
-                    if (still_looking_for_first_layer_params) begin
-                        if (first_layer_calculation[i].state != CALCULATION_STATE_PENDING) begin
+                    ovalid <= 0;
+                end
+
+                fma_port.a <= '0;
+                fma_port.b <= '0;
+                fma_port.c <= '0;
+                fma_port.ivalid <= '0;
+                fma_port.iid <= REG_ZERO;
+
+                // read in special input registers, reset the others.
+                regs[REG_ZERO].value <= '0;
+                regs[REG_ZERO].valid <= 1;
+
+                regs[REG_NX].value <= n.v.x;
+                regs[REG_NX].valid <= 1;
+
+                regs[REG_NY].value <= n.v.y;
+                regs[REG_NY].valid <= 1;
+
+                regs[REG_NZ].value <= n.v.z;
+                regs[REG_NZ].valid <= 1;
+
+                regs[REG_D].value <= d;
+                regs[REG_D].valid <= 1;
+
+                regs[REG_T].value <= t;
+                regs[REG_T].valid <= 1;
+
+                regs[REG_PX].value <= p.v.x;
+                regs[REG_PX].valid <= 1;
+
+                regs[REG_PY].value <= p.v.y;
+                regs[REG_PY].valid <= 1;
+
+                regs[REG_PZ].value <= p.v.z;
+                regs[REG_PZ].valid <= 1;
+
+                fma_sequence_position <= 0;
+
+                // mark all other regs as invalid.
+                for (int unsigned i = REG_V1; i <= REG_V11; i++) begin
+                    regs[i].value <= '0;
+                    regs[i].valid <= 0;
+                end
+
+                if (ivalid && iready) begin
+                    iready <= 0;
+                    ovalid <= 0; // ovalid should already be 0 at this point, however.
+                    unit_state <= CALC;
+                end
+            end : proc_idle
+            CALC: begin : proc_calc
+
+                if (fma_sequence_position < 10 || fma_sequence_position == 10) begin
+                    // set up the next calculation in the sequence.
+
+                    if (fma_sequence[fma_sequence_position].rs1_negate) begin
+                        if (fma_sequence[fma_sequence_position].rs1_shift) begin
+                            fma_port.a <= -regs[fma_sequence[fma_sequence_position].rs1].value << 1;
+                        end else begin
+                            fma_port.a <= -regs[fma_sequence[fma_sequence_position].rs1].value;
                         end
-                        else if (first_layer_calculation[first_layer_calculation[i].depends_on].state != CALCULATION_STATE_FINISHED) begin
-                        end
-                        else begin
-                            // found an available calculation, set up the inputs to it.
-                            small_fma.ivalid = 1; // will be visible externally on next cycle
-                            small_fma.a = captured_inputs[first_layer_calculation[i].a_input];
-                            small_fma.b = captured_inputs[first_layer_calculation[i].b_input];
-                            small_fma.iid = i;
-                            first_layer_calculation[i].state = CALCULATION_STATE_RUNNING;
-                            
-                            // calculations which depend on the null calculation always use 0 as their c-input,
-                            // everything else uses the result of the required calculation as the c-input.
-                            if (first_layer_calculation[i].depends_on == FIRST_LAYER_NULL_CALCULATION) begin
-                                // special case for first component of finding n * p - d
-                                small_fma.c = (i == FIRST_LAYER_N_DOT_P_Z) ? -d_as_double : '0;
-                            end else begin
-                                small_fma.c = first_layer_calculation[first_layer_calculation[i].depends_on].result;
-                            end
-                            still_looking_for_first_layer_params = 0;
+                    end else begin
+                        if (fma_sequence[fma_sequence_position].rs1_shift) begin
+                            fma_port.a <= regs[fma_sequence[fma_sequence_position].rs1].value << 1;
+                        end else begin
+                            fma_port.a <= regs[fma_sequence[fma_sequence_position].rs1].value;
                         end
                     end
-                end : find_first_layer_params_loop
-                
-                // check if any first-layer calculations need to be submitted or waited on
-                any_first_layer_calculations_remaining = 0;
-                for(int unsigned i = 0; i < 8; i++) begin
-                    if (first_layer_calculation[i].state != CALCULATION_STATE_FINISHED) begin
-                        any_first_layer_calculations_remaining = 1;
-                        break;
+
+                    fma_port.b <= regs[fma_sequence[fma_sequence_position].rs2].value;
+                    //                           |-------------- single_ibits + double_fbits - 1 -> bit index 
+                    //                           |    |-------- double_fbits - 1 -> bit index
+                    //                           |    |    |--- double_fbits - single_fbits - 1 -> bit index
+                    // double             -> 0xIIIIII'FFFFFFFFFF
+                    // single into double -> 0xsssIII'FFFFF00000
+                    // s -> sign bit
+                    // I -> integer bit
+                    // F -> fraction bit
+                    // 0 -> zero bit
+                    if (fma_sequence[fma_sequence_position].rs3_negate) begin
+                        fma_port.c <= -($signed(regs[fma_sequence[fma_sequence_position].rs3].value) <<< (double_fbits - single_fbits));
+                    end else begin
+                        fma_port.c <= $signed(regs[fma_sequence[fma_sequence_position].rs3].value) <<< (double_fbits - single_fbits);
                     end
+
+                    fma_port.iid <= fma_sequence[fma_sequence_position].dst;
+
+                    // are all inputs valid on this cycle? if so, set ivalid to
+                    // 1. If iready is also high on this cycle, add 1 to the sequence
+                    // position
+                    //
+                    // if any invalid input, set ivalid low.
+                    if (regs[fma_sequence[fma_sequence_position].rs1].valid && regs[fma_sequence[fma_sequence_position].rs2].valid && regs[fma_sequence[fma_sequence_position].rs3].valid) begin
+                        // all valid.
+                        fma_port.ivalid <= 1;
+
+                        if (fma_port.iready) begin
+                            fma_sequence_position <= fma_sequence_position + 1;
+                        end
+                    end else begin // any input is invalid.
+                        fma_port.ivalid <= 0;
+                    end
+                end else begin
+                    fma_port.ivalid <= 0;   // ensure that no calculations start
+                                            // on accident.
                 end
-                // go to the next state if all calculations are finished
-                if (!any_first_layer_calculations_remaining) begin
-                    state <= STATE_PREPARE_N_DOT_P_MINUS_D_SQUARED;
-                end
-
-            end : find_param
-
-            STATE_PREPARE_N_DOT_P_MINUS_D_SQUARED: begin
-                // remember we calculate the x-component last, so the result of that
-                // calculation contains the dot product.
-                large_fma.a = first_layer_calculation[FIRST_LAYER_N_DOT_P_X].result;
-                large_fma.b = first_layer_calculation[FIRST_LAYER_N_DOT_P_X].result;
-                large_fma.c = '0;
-                large_fma.ivalid = 1;
-                large_fma.oacknowledge = 1;
-                state <= STATE_WAIT_N_DOT_P_MINUS_D_SQUARED;
-            end
-
-            STATE_WAIT_N_DOT_P_MINUS_D_SQUARED: begin
-                large_fma.ivalid = 0; // don't submit more calculations
-                n_dot_p_squared = large_fma.r;
-                if (large_fma.ovalid) begin
-                    state <= STATE_SUBMIT_FINAL_CALCULATION;
-                end
-            end
-
-            STATE_SUBMIT_FINAL_CALCULATION: begin
-                large_fma.a = first_layer_calculation[FIRST_LAYER_FMA_T_T_0].result;
-                // remember that the x-component is calculated last, so this is the
-                // squared magnitude of n
-                large_fma.b = first_layer_calculation[FIRST_LAYER_N_DOT_N_X].result;
-                large_fma.c = -n_dot_p_squared;
-                large_fma.ivalid = 1;
-                large_fma.oacknowledge = 1;
-                state <= STATE_WAIT_ON_FINAL_CALCULATION;
-            end
-
-            STATE_WAIT_ON_FINAL_CALCULATION: begin 
-                large_fma.ivalid = 0; // don't submit more calculations
-                compare_value = large_fma.r;
-                inlier = ($signed(compare_value) >= $signed('0));
-                if (large_fma.ovalid) begin
-                    state <= STATE_SETTLE_INLIER_VALUE;
-                end
-            end
-            
-            STATE_SETTLE_INLIER_VALUE: begin
-                compare_value = large_fma.r;
-                inlier = ($signed(compare_value) >= $signed('0));
-                state <= STATE_IDLE;
-                ovalid = 1;
-            end
-
-            STATE_IDLE: begin
-                if (ovalid && oacknowledge && !iready) begin
-                    inlier = 0;
-                    iready = 1;
-                end else if (ivalid && iready) begin
-                    ovalid = 0;
-                    iready = 0;
-                    inlier = 0;
-                    state <= STATE_FIRST_LAYER_FIND_PARAM;
-                end
-                // always capture inputs on every cycle spent idle
-                captured_inputs[CAPTURED_INPUT_T] = t;
-                captured_inputs[CAPTURED_INPUT_D] = d;
-                captured_inputs[CAPTURED_INPUT_NX] = n.v.x;
-                captured_inputs[CAPTURED_INPUT_NY] = n.v.y;
-                captured_inputs[CAPTURED_INPUT_NZ] = n.v.z;
-                captured_inputs[CAPTURED_INPUT_PX] = p.v.x;
-                captured_inputs[CAPTURED_INPUT_PY] = p.v.y;
-                captured_inputs[CAPTURED_INPUT_PZ] = p.v.z;
-
-                small_fma.ivalid = 0;
-                large_fma.ivalid = 0;
                 
-                // we haven't calculated anything yet
-                for (int unsigned i = 1; i < 8; i++) begin
-                    first_layer_calculation[i].state = CALCULATION_STATE_PENDING;
+                // regardless of whether a calculation starts this cycle,
+                // accept any input that has just finished.
+                if (fma_port.ovalid) begin
+                    // mod 20 (which shouldn't be necessary)
+                    // to ensure that reg index is never out of bounds.
+                    regs[fma_port.oid].value <= rounding_port.ovalue;
+                    regs[fma_port.oid].valid <= 1;
                 end
 
-            end
+                // if we just finished the last calculation, report the results.
+                if (regs[REG_V11].valid && fma_sequence_position == 11) begin
+                    inlier <= $signed(regs[REG_V11].value) >= $signed(0);
+                    ovalid <= 1;
+                    unit_state <= IDLE;
+                end
 
+            end : proc_calc
             endcase
-
-        end : state_machine 
-
-    end : main_logic
+        end
+    end
 
     fp_fma#(
         .reset_polarity(reset_polarity),
         .ibits(single_ibits),
         .fbits(single_fbits),
-        .latency(latency_small_fma),
-        .id_bits($bits(small_fma.iid))
-    ) small_fma_unit (
+        .id_bits(5),
+        .latency(latency_fma),
+        .add_latency(0)
+    ) fma_unit(
         .clock(clock),
         .reset(reset),
-        .a(small_fma.a),
-        .b(small_fma.b),
-        .c(small_fma.c),
-        .r(small_fma.r),
-        .iid(small_fma.iid),
-        .oid(small_fma.oid),
-        .iready(small_fma.iready),
-        .ivalid(small_fma.ivalid),
-        .ovalid(small_fma.ovalid),
-        .oacknowledge(small_fma.oacknowledge)
+        .a(fma_port.a),
+        .b(fma_port.b),
+        .c(fma_port.c),
+        .r(fma_port.r),
+        .iid(fma_port.iid),
+        .oid(fma_port.oid),
+        .ivalid(fma_port.ivalid),
+        .iready(fma_port.iready),
+        .ovalid(fma_port.ovalid),
+        .oacknowledge(fma_port.oacknowledge)
     );
 
-    fp_fma#(
-        .reset_polarity(reset_polarity),
-        .ibits(double_ibits),
-        .fbits(double_fbits),
-        .latency(latency_large_fma),
-        .id_bits($bits(large_fma.iid))
-    ) large_fma_unit(
-        .clock(clock),
-        .reset(reset),
-        .a(large_fma.a),
-        .b(large_fma.b),
-        .c(large_fma.c),
-        .r(large_fma.r),
-        .iid(large_fma.iid),
-        .oid(large_fma.oid),
-        .iready(large_fma.iready),
-        .ivalid(large_fma.ivalid),
-        .ovalid(large_fma.ovalid),
-        .oacknowledge(large_fma.oacknowledge)
+    fp_truncate#(
+        .iibits(double_ibits + 1),
+        .ifbits(double_fbits),
+        .oibits(single_ibits),
+        .ofbits(single_fbits),
+        .signed_values(1)
+    ) truncate_unit(
+        .ivalue(rounding_port.ivalue),
+        .ovalue(rounding_port.ovalue)
     );
 
 endmodule : check_inlier

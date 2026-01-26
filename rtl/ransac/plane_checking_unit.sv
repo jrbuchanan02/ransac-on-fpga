@@ -673,8 +673,7 @@ module plane_checking_unit#(
     generate
         for(i = 0; i < check_inlier_instance_count; i++) begin
             check_inlier#(
-                .latency_large_fma(large_fma_latency),
-                .latency_small_fma(small_fma_latency),
+                .latency_fma(small_fma_latency),
                 .reset_polarity(reset_polarity)
             ) check_inlier_instance(
                 .clock(clock),
