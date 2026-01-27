@@ -17,7 +17,6 @@ module tb_ransac_unit_simulation;
     // to the expectation, pass. Otherwise, fail.
 
     typedef struct {
-        real double[0:2];
         vector::vector3s_s fixed;
     } point_in_cloud_s;
 
@@ -191,16 +190,20 @@ module tb_ransac_unit_simulation;
         // offset 16 -> cloud size in points
         ransac_control_write(ransac_clock, ransac_control_awaddr, ransac_control_awvalid, ransac_control_awready, ransac_control_wdata, ransac_control_wstrb, ransac_control_wvalid, ransac_control_wready, ransac_control_bready, ransac_control_bvalid, ransac_control_bresp, 16, simulated_point_cloud::point_count, 4'b1111);
         // offset 20 -> requested iteration count
-        ransac_control_write(ransac_clock, ransac_control_awaddr, ransac_control_awvalid, ransac_control_awready, ransac_control_wdata, ransac_control_wstrb, ransac_control_wvalid, ransac_control_wready, ransac_control_bready, ransac_control_bvalid, ransac_control_bresp, 20, 1000, 4'b1111);
+        ransac_control_write(ransac_clock, ransac_control_awaddr, ransac_control_awvalid, ransac_control_awready, ransac_control_wdata, ransac_control_wstrb, ransac_control_wvalid, ransac_control_wready, ransac_control_bready, ransac_control_bvalid, ransac_control_bresp, 20, simulated_point_cloud::point_count / 10, 4'b1111);
         // offset 28 -> threshold
-        ransac_control_write(ransac_clock, ransac_control_awaddr, ransac_control_awvalid, ransac_control_awready, ransac_control_wdata, ransac_control_wstrb, ransac_control_wvalid, ransac_control_wready, ransac_control_bready, ransac_control_bvalid, ransac_control_bresp, 28, vector::real_to_fixed(simulated_point_cloud::reference_threshold).as_single, 4'b1111);
+        ransac_control_write(ransac_clock, ransac_control_awaddr, ransac_control_awvalid, ransac_control_awready, ransac_control_wdata, ransac_control_wstrb, ransac_control_wvalid, ransac_control_wready, ransac_control_bready, ransac_control_bvalid, ransac_control_bresp, 28, simulated_point_cloud::reference_threshold, 4'b1111);
         // offset 0 -> calculation start strobe
         ransac_control_write(ransac_clock, ransac_control_awaddr, ransac_control_awvalid, ransac_control_awready, ransac_control_wdata, ransac_control_wstrb, ransac_control_wvalid, ransac_control_wready, ransac_control_bready, ransac_control_bvalid, ransac_control_bresp, 0, 1, 4'b0001);
 
         // kludge of sorts to poll the unit state every cycle.
-        ransac_control_araddr = 8; // caclculation state
+        ransac_control_araddr = ransac_control_base_addr + 8; // caclculation state
         ransac_control_arvalid = 1; // request every cycle
         ransac_control_rready = 1; // always ready to listen.
+        
+        while (!ransac_control_rvalid) begin
+            @(posedge ransac_clock);
+        end
 
         while (ransac_control_rdata[0] == 0) begin
             @(posedge ransac_clock);
@@ -221,7 +224,7 @@ module tb_ransac_unit_simulation;
         // assign the simulated cloud
         for (int unsigned i = 0; i < simulated_point_cloud::point_count; i++) begin
             for (int unsigned j = 0; j < 3; j++) begin
-                cloud[i].double[j] = simulated_point_cloud::cloud[i][j];
+                // cloud[i].double[j] = simulated_point_cloud::cloud[i][j];
                 cloud[i].fixed.c[j] = simulated_point_cloud::cloud_fixed_point[i][j];
 
                 if (cloud[i].fixed.c[j] === 32'hxxxxxxxx) begin
@@ -267,7 +270,7 @@ module tb_ransac_unit_simulation;
     ransac_unit_wrapper#(
         .control_addr_base(ransac_control_base_addr),
         .plane_check_unit_count(1),
-        .check_inlier_units_per_plane_check_unit(1)
+        .check_inlier_units_per_plane_check_unit(4)
     ) ransac_under_test(
         .clock(ransac_clock),
         .reset(ransac_reset),

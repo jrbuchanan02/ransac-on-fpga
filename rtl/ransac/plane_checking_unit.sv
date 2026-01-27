@@ -218,12 +218,12 @@ module plane_checking_unit#(
 
         // 1 if any check_inlier_control.iready is set
         logic any_check_inlier_instances_ready;
-        // 1 if all check_inlier_control.ovalid set
-        logic all_check_inlier_instances_finished;
         // index corresponding to the "first" ready check inlier instance
         // "first" -> highest index since that's just how the loop works
         // value is 0 if none are ready.
         logic [$clog2(check_inlier_instance_count)-1:0] first_ready_check_inlier_instance;
+        // check inlier units which are working on a calculation.
+        logic [check_inlier_instance_count-1:0] active_check_inlier_units;
     } check_plane_vars;
     
     enum logic [2:0] {
@@ -278,7 +278,6 @@ module plane_checking_unit#(
 
         // any check_inlier units ready and first ready check_inlier unit
         check_plane_vars.any_check_inlier_instances_ready = '0;
-        check_plane_vars.all_check_inlier_instances_finished = '1;
         check_plane_vars.first_ready_check_inlier_instance = '0;
         for (int unsigned i = 0; i < check_inlier_instance_count; i++) begin
             if (check_inlier_control[i].iready) begin
@@ -286,8 +285,8 @@ module plane_checking_unit#(
                 check_plane_vars.first_ready_check_inlier_instance = i;
             end
 
-            if (!check_inlier_control[i].ovalid) begin
-                check_plane_vars.all_check_inlier_instances_finished = '0;
+            if (check_inlier_control[i].ovalid) begin
+                check_plane_vars.active_check_inlier_units[i] = 0;
             end
         end
 
@@ -314,6 +313,7 @@ module plane_checking_unit#(
             check_plane_vars.cloud_length = '0;
             check_plane_vars.threshold = '0;
             check_plane_vars.inliers = '0;
+            check_plane_vars.active_check_inlier_units = '0;
             // ready for input, no valid output
             iready = 1;
             ovalid = 0;
@@ -469,7 +469,6 @@ module plane_checking_unit#(
                     check_inlier_control[check_plane_vars.first_ready_check_inlier_instance].p.v.x = memory_variable[MEMORY_VARIABLE_NEXT_POINT_X_PART].memory_value.value;
                     check_inlier_control[check_plane_vars.first_ready_check_inlier_instance].p.v.y = memory_variable[MEMORY_VARIABLE_NEXT_POINT_Y_PART].memory_value.value;
                     check_inlier_control[check_plane_vars.first_ready_check_inlier_instance].p.v.z = memory_variable[MEMORY_VARIABLE_NEXT_POINT_Z_PART].memory_value.value;
-                    check_inlier_control[check_plane_vars.first_ready_check_inlier_instance].ivalid = 1;
 
                     // begin reading the next point if there is one to read.
                     // do the calculation in this (kind of strange) order to
@@ -477,20 +476,29 @@ module plane_checking_unit#(
                     // cloud_length is near the max that next_point_offset never overflows.
                     if (3 * check_plane_vars.cloud_length != check_plane_vars.next_point_offset + 3) begin
                         check_plane_vars.next_point_offset += 3;
+                                    
+                        check_inlier_control[check_plane_vars.first_ready_check_inlier_instance].ivalid = 1;
+                        check_plane_vars.active_check_inlier_units[check_plane_vars.first_ready_check_inlier_instance] = 1;
+
                         for (int unsigned i = 0; i < 3; i++) begin
                             memory_variable[i + max_plane_point_index].offset = check_plane_vars.next_point_offset + i;
                             memory_variable[i + max_plane_point_index].requests.unread = 1;
                         end
-                    end else begin 
+                    end else begin
                         // if no new points to submit (at this point in the logic), 
                         // that means we're waiting on the last few points to finish the calculation
                         // we're finished iff all check_inlier instances have finished the calculation
-                        if (check_plane_vars.all_check_inlier_instances_finished) begin
+                        if (check_plane_vars.active_check_inlier_units == '0) begin
                             status = ransac::PLANE_CHECKING_UNIT_STATUS_SUCCESS;
                             ovalid = '1;
                             
                             check_plane_state = CHECK_PLANE_STATE_IDLE;
                         end
+
+                        // // force no new calculations when waiting for the last one.
+                        // for (int i = 0; i < check_inlier_instance_count; i++) begin
+                        //     check_inlier_control[i].ivalid = 0;
+                        // end
                     end
                 end
 

@@ -17,7 +17,8 @@ module fp_truncate#(
         parameter int unsigned ofbits = 20,
         parameter bit signed_values = 1)(
         input logic [iibits+ifbits-1:0] ivalue,
-        output logic [oibits+ofbits-1:0] ovalue
+        output logic [oibits+ofbits-1:0] ovalue,
+        output logic saturated
     );
 
     localparam logic [oibits+ofbits-1:0] unsigned_sat_value = {oibits+ofbits{1'b1}};
@@ -39,10 +40,16 @@ module fp_truncate#(
         if (signed_values) begin
             if ($signed(truncated) != $signed(rounded_down)) begin
                 ovalue = $signed(ivalue) < 0 ? signed_sat_negative : -signed_sat_negative;
+                saturated = 1;
+            end else begin
+                saturated = 0;
             end
         end else begin
             if ($unsigned(truncated) != $unsigned(rounded_down)) begin
                 ovalue = unsigned_sat_value;
+                saturated = 1;
+            end else begin
+                saturated = 0;
             end
         end
     end
