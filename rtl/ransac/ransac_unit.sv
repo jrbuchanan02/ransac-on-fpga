@@ -65,11 +65,11 @@ module ransac_unit#(
     parameter logic [31:0] memory_rid_base = 32'h0000_0000,
     parameter int unsigned control_addr_width = 32,
     parameter int unsigned control_data_width = 32,
-    parameter int unsigned plane_check_unit_count = 2,
-    parameter int unsigned check_inlier_units_per_plane_check_unit = 2,
+    parameter int unsigned plane_check_unit_count = 1, // FIXME: bug in memory operations per unit, should change to a round robin.
+    parameter int unsigned check_inlier_units_per_plane_check_unit = 4, // FIXME: once I saw weird issues with 8 check inlier units per plane checking unit.
     parameter int unsigned small_fma_latency = vector::fma_latency_singles,
-    parameter int unsigned large_fma_latency = vector::fma_latency_doubles,
-    parameter int unsigned plane_fma_latency = vector::fma_latency_doubles,
+    parameter int unsigned large_fma_latency = vector::fma_latency_singles,
+    parameter int unsigned plane_fma_latency = vector::fma_latency_singles,
     parameter int unsigned lfsr_register_width = 64,
     parameter int unsigned lfsr_window_width = 32,
     parameter int unsigned lfsr_window_start = 16,
@@ -361,8 +361,21 @@ module ransac_unit#(
 
                 if (memory_arready && memory_arvalid) begin
                     plane_checking_unit_port[cloud_read_control.servicing_addr_for_unit].point_addr_ready = '1;
-                    memory_arvalid <= '0;
-                    cloud_read_addr_state <= CLOUD_READ_ADDR_IDLE;
+                    // if we would switch to the wait state if we were idle, run the
+                    // logic for the idle state here.
+
+                    if (cloud_read_control.units_pending_read != '0) begin
+                        cloud_read_control.servicing_addr_for_unit = cloud_read_control.smallest_score_pending_read;
+                        memory_araddr <= plane_checking_unit_port[cloud_read_control.servicing_addr_for_unit].point_addr + memory_vars.cloud_base;
+                        memory_arvalid <= '1;
+                        memory_arid <= memory_rid_base + cloud_read_control.servicing_addr_for_unit;
+                        cloud_read_addr_state <= CLOUD_READ_ADDR_WAIT;
+                    end else begin
+                        memory_arvalid <= '0;
+                        cloud_read_addr_state <= CLOUD_READ_ADDR_IDLE;
+                    end
+
+
                     
                     if (cloud_read_control.decrement_other_scores_on_service) begin
                         for (int unsigned i = 0; i < plane_check_unit_count; i++) begin

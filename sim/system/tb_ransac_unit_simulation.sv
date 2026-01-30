@@ -149,6 +149,8 @@ module tb_ransac_unit_simulation;
     localparam logic [31:0] sim_memory_base = 32'h8000_0000;
     localparam logic [31:0] sim_memory_last = sim_memory_base + (3 * $bits(vector::single_t) / 8) * simulated_point_cloud::point_count;
 
+    assign ransac_memory_rid = ransac_memory_arid;
+
     initial begin : run_test
         // hold the ransac unit in reset
         ransac_reset = 1;
@@ -161,7 +163,6 @@ module tb_ransac_unit_simulation;
         ransac_control_rready = 0;
         ransac_control_bready = 0;
         ransac_control_wstrb = 4'b1111;
-        ransac_memory_rid = 0;
         @(posedge sim_clock);
         @(negedge sim_clock) ransac_reset = 0;
 
@@ -212,6 +213,44 @@ module tb_ransac_unit_simulation;
         while (ransac_control_rdata[0] == 1) begin
             @(posedge ransac_clock);
         end
+
+        // read the waveform results.
+        @(negedge ransac_clock) begin
+            ransac_control_araddr = ransac_control_base_addr + 20; // inlier count.
+        end
+        while (!ransac_control_rvalid) begin
+            @(posedge ransac_clock);
+        end
+        $display("Inlier count: %d", ransac_control_rdata);
+        @(negedge ransac_clock) begin
+            ransac_control_araddr = ransac_control_base_addr + 24;  // x component of ground plane normal.
+        end
+        while (!ransac_control_rvalid) begin
+            @(posedge ransac_clock);
+        end
+        $display("Plane Normal X component: %x", ransac_control_rdata);
+        @(negedge ransac_clock) begin
+            ransac_control_araddr = ransac_control_base_addr + 28;  // y component of ground plane normal.
+        end
+        while (!ransac_control_rvalid) begin
+            @(posedge ransac_clock);
+        end
+        $display("Plane Normal Y component: %x", ransac_control_rdata);
+        @(negedge ransac_clock) begin
+            ransac_control_araddr = ransac_control_base_addr + 32;  // z component of ground plane normal.
+        end
+        while (!ransac_control_rvalid) begin
+            @(posedge ransac_clock);
+        end
+        $display("Plane Normal Z component: %x", ransac_control_rdata);
+        @(negedge ransac_clock) begin
+            ransac_control_araddr = ransac_control_base_addr + 36;  // distance from plane to origin
+        end
+        while (!ransac_control_rvalid) begin
+            @(posedge ransac_clock);
+        end
+        $display("Plane Distance to origin: %x", ransac_control_rdata);
+
 
         $finish("Simulation complete. Please inspect results in waveform.");
 
