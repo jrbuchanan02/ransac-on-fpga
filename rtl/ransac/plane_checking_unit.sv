@@ -59,6 +59,7 @@ module plane_checking_unit#(
         input logic [data_width-1:0] point_data,
         // hopefully always AXI_RESP_OKAY. If not, then the calculation
         // ends and status is set to PLANE_CHECKING_UNIT_STATUS_BUS_ERROR
+        // TODO: re-implement handling bus errors.
         input logic [1:0] point_resp,
         // 1 if data is valid
         input logic point_data_valid,
@@ -66,117 +67,272 @@ module plane_checking_unit#(
         output logic point_data_ready
     );
 
-    // from idle -> number of points
+    // this unit is responsible for managing a derive_plane unit and some
+    // number of check_inlier units. To do this, we manage two state machines:
+    // 1. a state machine controlling the calculations
+    // 2. a state machine which reads to and from memory.
     //
-    // 1. capture the offsets for each of the 3 plane-defining points
-    // 2. read point a (point_addr = plane_point_offsets[0]; plane_addr_valid = 1, point_data_ready = 1) \ 
-    // 3. await point a                                                                                  | can make one state
-    // 4. capture point a                                                                               /
-    // 5. repeat 2 through 4 for points b and c
-    // 6. derive the plane
-    // 7. wait on deriving the plane; set an internal point_offset value to 0
-    // 8. capture the derived plane
-    // 9. read points at point_offset_value and feed them to check inlier units as fast as possible
-    //    on any cycle, increment an internal inlier count by the number of check_inlier instances 
-    //    which (on this cycle) find an inlier
-    // 10. report that the output is ready and return to the idle state.
-    // 
-    // to do the above, we need to capture / remember:
-    //   1. offsets to points a, b, c
-    //   2. points a, b, c
-    //   3. derived n and d
-    //   4. address of the next point to read
-    //   5. count of inliers found so far
-    //   6. what the cloud length was when we started
+    // For this initial implementation, we assume that data_width is the same
+    // as bits_in_single. Later implementations may make different assumptions.
+    //
+    //
+    // Memory controller states:
+    // 1. Sits idle
+    // 2. Reads points A, B, and C to derive a plane. The memory controller can
+    //    also prefetch the first point to derive at this point.
+    // 3. Reads the requested point + 1 until that would exceed the cloud
+    // bounds
+    //
+    // To request a point at some offset:
+    // 1. read the word at 3 * offset
+    // 2. read the word at 3 * offset + bytes in single
+    // 3. read the word at 3 * offset + 2 * bytes in single
+    //
+    // Since our code has an AXI bus (albeit a trimmed down one), this process can be split into a state
+    // machine consisting of 3 states:
+    //
+    // Port Controller States:
+    // 1. Idle
+    // 2. Address Stage
+    // 3. Data Stage
+    //
+    // This controller will not be super high performance, but since it takes
+    // multiple cycles to derive a plane or check for an inlier, it can likely
+    // keep up. (we then get a third state machine from this process.)
 
-    
-    // create internal data-read manager logic which 
-    // can access a, b, c, and a "point fresh from memory" register
-
-    typedef logic [$clog2(maximum_points)-1:0] point_offset_t;
-
-    typedef enum logic [2:0] {
-        // not read and don't want it yet
-        MEMORY_DATA_STATE_KEEP_UNREAD,
-        // not read but it's wanted
-        MEMORY_DATA_STATE_UNREAD,
-        // reading it
-        MEMORY_DATA_STATE_READING,
-        // up to date
-        MEMORY_DATA_STATE_READ,
-        MEMORY_DATA_STATE_ERROR
-    } memory_data_state_e;
-    
-    typedef struct packed {
-          union packed {
-            logic [data_width-1:0] raw_bits;
-            vector::single_t value;
-        } memory_value;
-        struct packed {
-            // 1 if requesting to switch from KEEP_UNREAD or READ -> UNREAD
-            // can only be driven by main state machine, to prevent
-            // multi-driven nets
-            logic unread;
-            // 1 if requesting to switch from UNREAD -> READING
-            // can only be driven by memory bus state machine, to
-            // prevent multi-driven nets
-            logic accept;
-            // 1 if requesting to switch from READING -> ERROR
-            // can only be driven by memory bus state machine, to
-            // prevent multi-driven nets
-            logic error;
-            // 1 if requesting to switch from READING -> READ
-            // can only be driven by memory bus state machine, to
-            // prevent multi-driven nets
-            logic finish;
-            // 1 if requesting to switch from anything -> KEEP_UNREAD
-            // can only be driven by main state machine, to prevent
-            // multi-driven nets
-            logic reset;
-        } requests;
-        memory_data_state_e state;
-        point_offset_t offset;
-    } point_from_memory_s;
-
+    // a scalar which has been read from memory
     typedef enum logic [3:0] {
-        // x component of point A for derive plane
-        MEMORY_VARIABLE_POINT_A_X_PART,
-        // y component of point A for derive plane
-        MEMORY_VARIABLE_POINT_A_Y_PART,
-        MEMORY_VARIABLE_POINT_A_Z_PART,
-        MEMORY_VARIABLE_POINT_B_X_PART,
-        MEMORY_VARIABLE_POINT_B_Y_PART,
-        MEMORY_VARIABLE_POINT_B_Z_PART,
-        MEMORY_VARIABLE_POINT_C_X_PART,
-        MEMORY_VARIABLE_POINT_C_Y_PART,
-        MEMORY_VARIABLE_POINT_C_Z_PART,
-        // x component of the next point for a check_inlier instance
-        MEMORY_VARIABLE_NEXT_POINT_X_PART,
-        // y component of the next point for a check_inlier instance
-        MEMORY_VARIABLE_NEXT_POINT_Y_PART,
-        // z component of the next point for a check_inlier instance
-        MEMORY_VARIABLE_NEXT_POINT_Z_PART
+        MEMORY_VARIABLE_AX, // x component of point A
+        MEMORY_VARIABLE_AY, // y component of point A
+        MEMORY_VARIABLE_AZ, // z component of point A
+        MEMORY_VARIABLE_BX, // x component of point B
+        MEMORY_VARIABLE_BY, // y component of point B
+        MEMORY_VARIABLE_BZ, // z component of point B
+        MEMORY_VARIABLE_CX, // x component of point C
+        MEMORY_VARIABLE_CY, // y component of point C
+        MEMORY_VARIABLE_CZ, // z component of point C
+        MEMORY_VARIABLE_NX, // x component of the next point to check
+        MEMORY_VARIABLE_NY, // y component of the next point to check
+        MEMORY_VARIABLE_NZ  // z component of the next point to check
     } memory_variable_e;
 
+    // the point that can be requested from the memory controller.
     typedef enum logic [1:0] {
-        MEMORY_BUS_STATUS_GOOD,
-        MEMORY_BUS_STATUS_BUS_ERROR,
-        MEMORY_BUS_STATUS_TIMEOUT
-    } memory_bus_status_e;
+        MEMORY_POINT_A, // plane point A
+        MEMORY_POINT_B, // plane point B
+        MEMORY_POINT_C, // plane point C
+        MEMORY_POINT_N  // the next point
+    } memory_point_e;
 
-    localparam int unsigned max_memory_variable_index = 12; // 4 * 3
-    localparam int unsigned max_plane_point_index = 9; // 3 * 3
+    // the variables read from memory. This register file is controlled by the
+    // port controller.
+    vector::single_t memory_file [0:11];
+    // set by the port controller if it can handle a new request.
+    logic memory_port_request_ready;
+    // set by the memory controller if it wants to issue a new request.
+    logic memory_port_request_valid;
+    // set by the memory controller if it is ready to receive the results of a
+    // finished request.
+    logic memory_port_response_ready;
+    // set by the port controller if a request has finished.
+    logic memory_port_response_valid;
+    // requested destination variable.
+    memory_variable_e memory_port_destination;
+    // requested point address (in words!)
+    logic [addr_width-1:0] memory_port_addr;
+    // data read from memory.
+    vector::single_t memory_port_data;
+    // the port controller's copy of where to write the memory variable to.
+    memory_variable_e memory_port_pending_destination;
 
-    point_from_memory_s [max_memory_variable_index-1:0] memory_variable;
+    enum {
+        PORT_STATE_IDLE,
+        PORT_STATE_ADDR,
+        PORT_STATE_DATA
+    } port_state;
 
-    // logic for controlling the derive_plane instance
+    always_ff @(posedge clock) begin : manage_port
+        if (reset == reset_polarity) begin
+            for (int unsigned i = 0; i < 12; i++) begin
+                memory_file[i] = '0;
+            end
+            memory_port_request_ready <= 1;
+            memory_port_response_valid <= 0;
+            memory_port_data <= '0;
+            point_addr <= '0;
+            point_addr_valid <= '0;
+            point_data_ready <= '0;
+            port_state <= PORT_STATE_IDLE;
+            memory_port_pending_destination <= '0;
+        end else begin
+            case (port_state)
+            PORT_STATE_IDLE: begin
+                point_data_ready <= '0;
+                if (memory_port_response_valid && memory_port_response_ready) begin
+                    memory_port_response_valid <= '0;
+                    memory_port_request_ready <= 1;
+                    memory_file[memory_port_pending_destination] <= memory_port_data;
+                end else if (memory_port_request_valid) begin
+                    point_addr <= memory_port_addr;
+                    point_addr_valid <= 1;
+                    memory_port_request_ready <= 0;
+                    memory_port_pending_destination <= memory_port_destination;
+                    port_state <= PORT_STATE_ADDR;
+                    memory_port_response_valid <= '0;
+                end
+            end
+            PORT_STATE_ADDR: begin
+
+                if (point_addr_valid && point_addr_ready) begin
+                    point_addr_valid <= '0;
+                    point_data_ready <= '1;
+                    port_state <= PORT_STATE_DATA;
+                end
+            end
+            PORT_STATE_DATA: begin
+                if (point_data_valid && point_data_ready) begin
+                    memory_port_response_valid <= 1;
+                    memory_port_data <= point_data;
+                    point_data_ready <= '0;
+                    port_state <= PORT_STATE_IDLE;
+                end
+            end
+            endcase
+        end
+    end : manage_port
+
+    // the memory controller takes requests to read a point at an offset into
+    // the cloud and converts it into a sequence of requests to the port
+    // controller.
+
+    // the memory controller is ready to accept an input. If this bit is a 1,
+    // then it is understood that the previous request has also finished.
+    logic memory_command_ready;
+    // the command is valid.
+    logic memory_command_valid;
+    // the offset of the requested point in the cloud.
+    logic [$clog2(maximum_points)-1:0] memory_command_point_offset;
+    // which point is being requested.
+    memory_point_e memory_command_point;
+
+    logic [addr_width-1:0] memory_command_x_addr;
+    logic [addr_width-1:0] memory_command_y_addr;
+    logic [addr_width-1:0] memory_command_z_addr;
+    memory_variable_e memory_command_x_dest;
+    memory_variable_e memory_command_y_dest;
+    memory_variable_e memory_command_z_dest;
+
+
+    enum {
+        MEMORY_CONTROLLER_IDLE, // no active request
+        MEMORY_CONTROLLER_GETX, // retrieve the X component
+        MEMORY_CONTROLLER_GETY, // retrieve the Y component
+        MEMORY_CONTROLLER_GETZ  // retrieve the Z component
+    } memory_controller_state;
+
+    // for now, always ready to receive the next point.
+    assign memory_port_response_ready = 1;
+
+    always_ff @(posedge clock) begin
+        if (reset == reset_polarity) begin
+            memory_port_request_valid <= '0;
+            memory_port_destination <= '0;
+            memory_port_addr <= '0;
+            memory_command_ready <= '1;
+            memory_command_x_addr <= '0;
+            memory_command_y_addr <= '0;
+            memory_command_z_addr <= '0;
+            memory_command_x_dest <= '0;
+            memory_command_y_dest <= '0;
+            memory_command_z_dest <= '0;
+            memory_controller_state <= MEMORY_CONTROLLER_IDLE;
+        end else begin
+            case (memory_controller_state)
+            MEMORY_CONTROLLER_IDLE: begin
+                case (memory_command_point)
+                MEMORY_POINT_A: begin
+                    memory_port_destination <= MEMORY_VARIABLE_AX;
+                    memory_command_x_dest <= MEMORY_VARIABLE_AX;
+                    memory_command_y_dest <= MEMORY_VARIABLE_AY;
+                    memory_command_z_dest <= MEMORY_VARIABLE_AZ;
+                end
+                MEMORY_POINT_B: begin
+                    memory_port_destination <= MEMORY_VARIABLE_BX;
+                    memory_command_x_dest <= MEMORY_VARIABLE_BX;
+                    memory_command_y_dest <= MEMORY_VARIABLE_BY;
+                    memory_command_z_dest <= MEMORY_VARIABLE_BZ;
+                end
+                MEMORY_POINT_C: begin
+                    memory_port_destination <= MEMORY_VARIABLE_CX;
+                    memory_command_x_dest <= MEMORY_VARIABLE_CX;
+                    memory_command_y_dest <= MEMORY_VARIABLE_CY;
+                    memory_command_z_dest <= MEMORY_VARIABLE_CZ;
+                end
+                MEMORY_POINT_N: begin
+                    memory_port_destination <= MEMORY_VARIABLE_NX;
+                    memory_command_x_dest <= MEMORY_VARIABLE_NX;
+                    memory_command_y_dest <= MEMORY_VARIABLE_NY;
+                    memory_command_z_dest <= MEMORY_VARIABLE_NZ;
+                end
+                endcase
+                memory_port_addr <= 12 * memory_command_point_offset + 0;
+                memory_command_x_addr <= 12 * memory_command_point_offset + 0;
+                memory_command_y_addr <= 12 * memory_command_point_offset + 4;
+                memory_command_z_addr <= 12 * memory_command_point_offset + 8;
+
+                if (!memory_command_ready) begin
+                    memory_command_ready <= 1;
+                end
+
+                if (memory_command_ready && memory_command_valid) begin
+                    if (!memory_port_request_ready) begin
+                        $error("Invalid condition: memory request active when not reading a point!");
+                        $finish(2);
+                    end
+                    memory_command_ready <= '0;
+                    memory_controller_state <= MEMORY_CONTROLLER_GETX;
+                    memory_port_request_valid <= 1;
+                    // memory_port_destination <= memory_command_x_dest;
+                    // memory_port_addr <= memory_command_x_addr;
+                end
+            end
+            MEMORY_CONTROLLER_GETX: begin
+                memory_port_request_valid <= 1;
+                memory_port_destination <= memory_command_y_dest;
+                memory_port_addr <= memory_command_y_addr;
+                if (memory_port_response_valid) begin
+                    memory_controller_state <= MEMORY_CONTROLLER_GETY;
+                end
+            end
+            MEMORY_CONTROLLER_GETY: begin
+                memory_port_request_valid <= 1;
+                memory_port_destination <= memory_command_z_dest;
+                memory_port_addr <= memory_command_z_addr;
+                if (memory_port_response_valid) begin
+                    memory_controller_state <= MEMORY_CONTROLLER_GETZ;
+                end
+            end
+            MEMORY_CONTROLLER_GETZ: begin
+                memory_port_request_valid <= 0;
+                if (memory_port_response_valid) begin
+                    memory_command_ready <= 1;
+                    memory_controller_state <= MEMORY_CONTROLLER_IDLE;
+                end
+            end
+            endcase
+        end
+    end
+
+    // the logic for controlling the various processing units and asking for 
+    // points from memory.
+    
+    // control port to derive planes.
     struct packed {
         logic ivalid;
         logic iready;
         vector::point_t a;
         vector::point_t b;
         vector::point_t c;
-
         logic ovalid;
         logic oacknowledge;
         vector::vector3s_s n;
@@ -184,478 +340,280 @@ module plane_checking_unit#(
         vector::derive_plane_status_e status;
     } derive_plane_control;
 
-    // logic for controlling the check_inlier instances
-    typedef struct packed {
+    // control port to each check inlier unit.
+    struct packed {
         logic ivalid;
         logic iready;
         vector::vector3s_s n;
-        vector::point_t p;
+        vector::vector3s_s p;
         vector::single_t d;
         vector::single_t t;
         logic ovalid;
         logic oacknowledge;
         logic inlier;
-    } check_inlier_control_s;
+    } check_inlier_control[check_inlier_instance_count-1:0];
 
-    check_inlier_control_s [check_inlier_instance_count-1:0] check_inlier_control;
+    // issue requests to the check inlier units in a round-robin fashion.
+    logic [check_inlier_instance_count == 0 ? 0 : ($clog2(check_inlier_instance_count)-1):0] next_inlier_unit;
+    // quantity of inliers found
+    logic [$clog2(maximum_points)-1:0] running_inlier_count;
+    // how many points have been tested in this iteration.
+    logic [$clog2(maximum_points)-1:0] tested_count;
+    // copy of the configuration variables.
+    logic [$clog2(maximum_points)-1:0] captured_cloud_length;
+    logic [2:0][$clog2(maximum_points)-1:0] captured_plane_point_offset;
+    vector::vector3s_s found_n;
+    vector::single_t found_d;
+    vector::single_t captured_threshold;
 
-    struct packed {
-        logic [$clog2(maximum_points)-1:0] cloud_length;
-        vector::single_t threshold;
-        logic [$clog2(maximum_points):0] inliers;
-        logic [$clog2(maximum_points)-1:0] next_point_offset;
-
-        vector::vector3s_s plane_n;
-        vector::single_t plane_d;
-        // variables used within a cycle or that are always combinatorial
-        
-        // 1 if variables ax through cz are in the READ state
-        logic received_all_plane_points;
-        // 1 if variables next_x through next_z are in the READ state  
-        logic received_next_point;
-        // 1 if any variable is in the ERROR state
-        logic bus_error_detected;
-
-        // 1 if any check_inlier_control.iready is set
-        logic any_check_inlier_instances_ready;
-        // index corresponding to the "first" ready check inlier instance
-        // "first" -> highest index since that's just how the loop works
-        // value is 0 if none are ready.
-        logic [$clog2(check_inlier_instance_count)-1:0] first_ready_check_inlier_instance;
-        // check inlier units which are working on a calculation.
-        logic [check_inlier_instance_count-1:0] active_check_inlier_units;
-    } check_plane_vars;
-    
-    enum logic [2:0] {
-        // idle and waiting for something to do
-        CHECK_PLANE_STATE_IDLE,
-        // wait on points a, b, and c to arrive
-        CHECK_PLANE_STATE_AWAIT_PLANE_POINTS,
-        // wait on the plane to be derived
-        CHECK_PLANE_STATE_AWAIT_DERIVE_PLANE,
-        // until all points have been processed, continue processing them.
-        CHECK_PLANE_STATE_ITERATE_OVER_CLOUD
-    } check_plane_state;
-
-    // cycles spent reading the current value
-    // placed before the logic for the memory variables since
-    // the check_plane state machine needs this information to
-    // differentiate a bus error from a bus timeout
-    logic [$clog2(maximum_read_latency):0] read_duration;
+    logic [$clog2(check_inlier_instance_count)-1:0] check_inliers_finished_this_cycle;
+    logic [$clog2(check_inlier_instance_count)-1:0] inliers_found_this_cycle;
 
     always_comb begin
-        inlier_count = check_plane_vars.inliers;
-        plane_n = check_plane_vars.plane_n;
-        plane_d = check_plane_vars.plane_d;
+        check_inliers_finished_this_cycle = 0;
+        inliers_found_this_cycle = 0;
+        for (int unsigned i = 0; i < check_inlier_instance_count; i++) begin
+            if (check_inlier_control[i].ovalid) begin
+                check_inliers_finished_this_cycle++;
+                inliers_found_this_cycle += check_inlier_control[i].inlier;
+            end
+        end
     end
 
-    always @(posedge clock) begin : main_logic
-        // update the within-cycle / combinatorial variables
+    enum {
+        // the idle state
+        CALCULATION_STATE_IDLE,
+        // request point A.
+        CALCULATION_STATE_REQUEST_A,
+        // waits on point A
+        CALCULATION_STATE_FETCH_A,
+        // waits on point B
+        CALCULATION_STATE_FETCH_B,
+        // waits on point C
+        CALCULATION_STATE_FETCH_C,
+        // waits on the first point to check and waits on the plane derived from
+        // A, B, and C.
+        CALCULATION_STATE_PREFETCH_FIRST_N,
+        // main calculation loop:
+        // -> for each check inlier unit with finished results, acknowledge the
+        //    result, increment running_inlier_count if inlier and unconditionally
+        //    increment the tested count.
+        // -> if tested_count == captured_cloud_length -> break and go to idle
+        // -> if we increment tested count at all, fetch the next point
+        //
+        // note: since check_inlier happens to always take the same amount of time
+        // to calculate whether a point is an inlier, this logic only needs to 
+        // handle the case when any of the units finish on this cycle.
+        CALCULATION_STATE_CALCULATE
+    } calculation_state;
+    // because of handshake signal timing issues mentioned in the
+    // implementation for CALCULATION_STATE_REQUEST_A, this variable
+    // exists to prevent the calculation state machine from requesting a point
+    // from the cloud to test on two consecutive cycles. With how the 
+    // memory controller is programmed, this feat should not be possible anywyay.
+    logic may_request_memory;
 
-        // received all plane points
-        check_plane_vars.received_all_plane_points = '1;
-        for (int unsigned i = 0; i < max_plane_point_index; i++) begin
-            if (memory_variable[i].state != MEMORY_DATA_STATE_READ) begin
-                check_plane_vars.received_all_plane_points = '0;
-            end
-        end
-        
-        // received next point
-        check_plane_vars.received_next_point = 1;
-        for (int unsigned i = max_plane_point_index; i < max_memory_variable_index; i++) begin
-            if (memory_variable[i].state != MEMORY_DATA_STATE_READ) begin
-                check_plane_vars.received_next_point = 0;
-            end
-        end
+    assign derive_plane_control.a.v.x = memory_file[MEMORY_VARIABLE_AX];
+    assign derive_plane_control.a.v.y = memory_file[MEMORY_VARIABLE_AY];
+    assign derive_plane_control.a.v.z = memory_file[MEMORY_VARIABLE_AZ];
+    assign derive_plane_control.b.v.x = memory_file[MEMORY_VARIABLE_BX];
+    assign derive_plane_control.b.v.y = memory_file[MEMORY_VARIABLE_BY];
+    assign derive_plane_control.b.v.z = memory_file[MEMORY_VARIABLE_BZ];
+    assign derive_plane_control.c.v.x = memory_file[MEMORY_VARIABLE_CX];
+    assign derive_plane_control.c.v.y = memory_file[MEMORY_VARIABLE_CY];
+    assign derive_plane_control.c.v.z = memory_file[MEMORY_VARIABLE_CZ];
 
-        // bus error detected
-        check_plane_vars.bus_error_detected = '0;
-        for (int unsigned i = 0; i < max_memory_variable_index; i++) begin
-            if (memory_variable[i].state == MEMORY_DATA_STATE_ERROR) begin
-                check_plane_vars.bus_error_detected = '1;
-            end
-        end
-
-        // any check_inlier units ready and first ready check_inlier unit
-        check_plane_vars.any_check_inlier_instances_ready = '0;
-        check_plane_vars.first_ready_check_inlier_instance = '0;
+    always_comb begin
         for (int unsigned i = 0; i < check_inlier_instance_count; i++) begin
-            if (check_inlier_control[i].iready) begin
-                check_plane_vars.any_check_inlier_instances_ready = '1;
-                check_plane_vars.first_ready_check_inlier_instance = i;
+            for (int unsigned j = 0; j < 3; j++) begin
+                check_inlier_control[i].n.c[j] = derive_plane_control.n.c[j];
             end
-
-            if (check_inlier_control[i].ovalid) begin
-                check_plane_vars.active_check_inlier_units[i] = 0;
-            end
+            check_inlier_control[i].d = derive_plane_control.d;
+            check_inlier_control[i].t = captured_threshold;
+            check_inlier_control[i].p.v.x = memory_file[MEMORY_VARIABLE_NX];
+            check_inlier_control[i].p.v.y = memory_file[MEMORY_VARIABLE_NY];
+            check_inlier_control[i].p.v.z = memory_file[MEMORY_VARIABLE_NZ];
+            check_inlier_control[i].oacknowledge = 1;
         end
 
-        for (int unsigned i = 0; i < max_memory_variable_index; i++) begin
-            memory_variable[i].requests.unread = 0;
-            memory_variable[i].requests.reset = 0;
-        end
-        
+        found_n = derive_plane_control.n;
+        found_d = derive_plane_control.d;
+    end
 
-        if (reset == reset_polarity) begin : handle_reset
-            check_plane_state = CHECK_PLANE_STATE_IDLE;
-            // not our job to reset the memory variable values
-            // or states but it is our job to reset their offsets
-            for (int unsigned i = 0; i < max_memory_variable_index; i++) begin
-                memory_variable[i].offset = '0;
-                memory_variable[i].requests.reset = '1;
+    always_ff @(posedge clock) begin
+        if (reset == reset_polarity) begin
+            iready <= '1;
+            ovalid <= '0;
+            inlier_count <= '0;
+            status <= ransac::PLANE_CHECKING_UNIT_STATUS_SUCCESS;
+            for (int unsigned i = 0; i < 3; i++) begin
+                plane_n.c[i] <= '0;
             end
-            // reset control signals to internal modules
-            derive_plane_control.ivalid = 0;
+            plane_d <= '0;
+            memory_command_valid <= '0;
+            memory_command_point_offset <= '0;
+            memory_command_point <= '0;
+            derive_plane_control.ivalid <= '0;
             for (int unsigned i = 0; i < check_inlier_instance_count; i++) begin
-                check_inlier_control[i].ivalid = 0;
+                check_inlier_control[i].ivalid <= 0;
             end
-            // reset captured vars
-            check_plane_vars.cloud_length = '0;
-            check_plane_vars.threshold = '0;
-            check_plane_vars.inliers = '0;
-            check_plane_vars.active_check_inlier_units = '0;
-            // ready for input, no valid output
-            iready = 1;
-            ovalid = 0;
-            status = ransac::PLANE_CHECKING_UNIT_STATUS_SUCCESS;
-        end : handle_reset
-
-        else begin : main_state_machine
-
-            case (check_plane_state)
-            
-            CHECK_PLANE_STATE_IDLE: begin
-                // change the state of all memory variables to KEEP_UNREAD
-                for (int unsigned i = 0; i < max_memory_variable_index; i++) begin
-                    memory_variable[i].requests.reset = '1;
-                end
-                // capture / set the state machine variables
-                check_plane_vars.cloud_length = cloud_length;
-                check_plane_vars.threshold = threshold;
-                check_plane_vars.inliers = 0;
-                check_plane_vars.next_point_offset = 0;
-                // capture the point offsets
-                memory_variable[MEMORY_VARIABLE_POINT_A_X_PART].offset = 3 * plane_point_start_offsets[0] + 0;
-                memory_variable[MEMORY_VARIABLE_POINT_A_Y_PART].offset = 3 * plane_point_start_offsets[0] + 1;
-                memory_variable[MEMORY_VARIABLE_POINT_A_Z_PART].offset = 3 * plane_point_start_offsets[0] + 2;
-                memory_variable[MEMORY_VARIABLE_POINT_B_X_PART].offset = 3 * plane_point_start_offsets[1] + 0;
-                memory_variable[MEMORY_VARIABLE_POINT_B_Y_PART].offset = 3 * plane_point_start_offsets[1] + 1;
-                memory_variable[MEMORY_VARIABLE_POINT_B_Z_PART].offset = 3 * plane_point_start_offsets[1] + 2;
-                memory_variable[MEMORY_VARIABLE_POINT_C_X_PART].offset = 3 * plane_point_start_offsets[2] + 0;
-                memory_variable[MEMORY_VARIABLE_POINT_C_Y_PART].offset = 3 * plane_point_start_offsets[2] + 1;
-                memory_variable[MEMORY_VARIABLE_POINT_C_Z_PART].offset = 3 * plane_point_start_offsets[2] + 2;
-                // prepare next point offset too
-                memory_variable[MEMORY_VARIABLE_NEXT_POINT_X_PART].offset = 0;
-                memory_variable[MEMORY_VARIABLE_NEXT_POINT_Y_PART].offset = 1;
-                memory_variable[MEMORY_VARIABLE_NEXT_POINT_Z_PART].offset = 2;
-
-                // don't accidentally submit any calculations to derive plane or any check inlier instance
-                // but if these modules have "junk" data, silently get rid of it  
-                derive_plane_control.ivalid = 0;
-                derive_plane_control.oacknowledge = 1;
+            next_inlier_unit <= '0;
+            running_inlier_count <= '0;
+            tested_count <= '0;
+            captured_cloud_length <= '0;
+            for (int unsigned i = 0; i < 3; i++) begin
+                captured_plane_point_offset[i] <= '0;
+            end
+            captured_threshold <= '0;
+            calculation_state <= CALCULATION_STATE_IDLE;
+            may_request_memory <= 1;
+        end else begin
+            case (calculation_state)
+            CALCULATION_STATE_IDLE: begin
+                derive_plane_control.oacknowledge <= 1;
+                may_request_memory <= 1;
                 for (int unsigned i = 0; i < check_inlier_instance_count; i++) begin
-                    check_inlier_control[i].ivalid = 0;
-                    check_inlier_control[i].oacknowledge = 1;
+                    check_inlier_control[i].ivalid <= 0;
                 end
-
-                // if we aren't ready because the output has not been acknowledged yet
-                // and the output is acknowledged on this cycle, set iready
-                if (!iready && ovalid && oacknowledge) begin
-                    iready = 1;
+                captured_threshold <= threshold;
+                captured_cloud_length <= cloud_length;
+                for (int unsigned i = 0; i < 3; i++) begin
+                    captured_plane_point_offset[i] <= plane_point_start_offsets[i];
                 end
-                // otherwise, if iready and ivalid, begin the calculation
-                else if (iready && ivalid) begin
-                    // request the points, wait for ax - cz starting on the next cycle
-                    for (int unsigned i = 0; i < max_memory_variable_index; i++) begin
-                        memory_variable[i].requests.reset = 0;
-                        memory_variable[i].requests.unread = 1;
-                    end
-                    iready = 0;
-                    check_plane_state = CHECK_PLANE_STATE_AWAIT_PLANE_POINTS;
+                tested_count <= '0;
+                running_inlier_count <= '0;
+
+                if (ovalid && oacknowledge) begin
+                    ovalid <= '0;
+                    iready <= '1;
                 end
-            end
-
-            CHECK_PLANE_STATE_AWAIT_PLANE_POINTS: begin
-                if (check_plane_vars.received_all_plane_points && !check_plane_vars.bus_error_detected) begin
-                    check_plane_state = CHECK_PLANE_STATE_AWAIT_DERIVE_PLANE;
-                    derive_plane_control.a.v.x = memory_variable[MEMORY_VARIABLE_POINT_A_X_PART].memory_value.value;
-                    derive_plane_control.a.v.y = memory_variable[MEMORY_VARIABLE_POINT_A_Y_PART].memory_value.value;
-                    derive_plane_control.a.v.z = memory_variable[MEMORY_VARIABLE_POINT_A_Z_PART].memory_value.value;
-
-                    derive_plane_control.b.v.x = memory_variable[MEMORY_VARIABLE_POINT_B_X_PART].memory_value.value;
-                    derive_plane_control.b.v.y = memory_variable[MEMORY_VARIABLE_POINT_B_Y_PART].memory_value.value;
-                    derive_plane_control.b.v.z = memory_variable[MEMORY_VARIABLE_POINT_B_Z_PART].memory_value.value;
-
-                    derive_plane_control.c.v.x = memory_variable[MEMORY_VARIABLE_POINT_C_X_PART].memory_value.value;
-                    derive_plane_control.c.v.y = memory_variable[MEMORY_VARIABLE_POINT_C_Y_PART].memory_value.value;
-                    derive_plane_control.c.v.z = memory_variable[MEMORY_VARIABLE_POINT_C_Z_PART].memory_value.value;
-
-                    derive_plane_control.ivalid = 1;
-                end
-
-                if (check_plane_vars.bus_error_detected) begin
-                    ovalid = 1;
-                    check_plane_state = CHECK_PLANE_STATE_IDLE;
-                    if (read_duration >= maximum_read_latency) begin
-                        status = ransac::PLANE_CHECKING_UNIT_STATUS_BUS_TIMEOUT;
-                    end else begin
-                        status = ransac::PLANE_CHECKING_UNIT_STATUS_BUS_ERROR;
-                    end
+                if (ivalid && iready) begin
+                    iready <= '0;
+                    calculation_state <= CALCULATION_STATE_REQUEST_A;
+                    memory_command_valid <= 1;
+                    memory_command_point_offset <= plane_point_start_offsets[0];
+                    memory_command_point <= MEMORY_POINT_A;
                 end
             end
-
-            CHECK_PLANE_STATE_AWAIT_DERIVE_PLANE: begin
+            CALCULATION_STATE_REQUEST_A: begin
+                // This state is a 1 cycle delay inserted because of some oddity
+                // with the handshake signals between the calculation state 
+                // controller and the memory request state controller that seems
+                // to leave the memory controller in the idle state one cycle 
+                // longer than intended.
+                calculation_state <= CALCULATION_STATE_FETCH_A;
+            end
+            CALCULATION_STATE_FETCH_A: begin
+                // don't immediately acknowledge the output on the derive plane
+                // control so that there is no race condition later between the
+                // first point to read and the plane derived.
+                derive_plane_control.oacknowledge <= '0;
+                memory_command_valid <= 1;
+                memory_command_point_offset <= captured_plane_point_offset[1];
+                memory_command_point <= MEMORY_POINT_B;
+                if (memory_command_ready) begin
+                    calculation_state <= CALCULATION_STATE_FETCH_B;
+                end
+            end
+            CALCULATION_STATE_FETCH_B: begin
+                memory_command_valid <= 1;
+                memory_command_point_offset <= captured_plane_point_offset[2];
+                memory_command_point <= MEMORY_POINT_C;
+                if (memory_command_ready) begin
+                    calculation_state <= CALCULATION_STATE_FETCH_C;
+                end
+            end
+            CALCULATION_STATE_FETCH_C: begin
+                memory_command_valid <= 1;
+                memory_command_point_offset <= '0;
+                memory_command_point <= MEMORY_POINT_N;
+                if (memory_command_ready) begin
+                    calculation_state <= CALCULATION_STATE_PREFETCH_FIRST_N;
+                    derive_plane_control.ivalid <= 1;
+                    if (!derive_plane_control.iready) begin
+                        $error("Derive plane unit not ready!");
+                        $finish(2);
+                    end
+                end
+            end
+            CALCULATION_STATE_PREFETCH_FIRST_N: begin
+                derive_plane_control.ivalid <= 0;
+                // have plane and first point. Start the first check inlier
+                // unit on this cycle and request the next point...
+                // if we succeeded in deriving the plane.
+                if (derive_plane_control.ovalid && memory_command_ready) begin
+                    case (derive_plane_control.status)
+                    // uh oh!
+                    vector::DERIVE_PLANE_STATUS_LESS_THAN_THREE_UNIQUE_POINTS: begin
+                        status <= ransac::PLANE_CHECKING_UNIT_STATUS_DERIVE_PLANE_ERROR;
+                        calculation_state <= CALCULATION_STATE_IDLE;
+                        ovalid <= 1;
+                    end
+                    // what we expect to happen.
+                    vector::DERIVE_PLANE_STATUS_SUCCESS: begin
+                        memory_command_point_offset <= 1;
+                        memory_command_valid <= 1;
+                        memory_command_point <= MEMORY_POINT_N;
+                        check_inlier_control[next_inlier_unit].ivalid <= 1;
+                        calculation_state <= CALCULATION_STATE_CALCULATE;
+                        may_request_memory <= 0;
+                        // special case for when there is only one check inlier unit.
+                        if (check_inlier_instance_count > 1) begin
+                            next_inlier_unit <= 1;
+                        end
+                    end
+                    endcase
+                end
+            end
+            CALCULATION_STATE_CALCULATE: begin
+                tested_count <= tested_count + check_inliers_finished_this_cycle;
+                running_inlier_count <= running_inlier_count + inliers_found_this_cycle;
                 
-                // don't accidentally submit a new calculation
-                derive_plane_control.ivalid = 0;
-                
-                // if the plane has been derived successfully and no error 
-                // next point has occurred in reading the next point then
-                // continue to iterating over the cloud.
+                // for each check inlier unit, if ivalid, clear ivalid
+                for (int unsigned i = 0; i < check_inlier_instance_count; i++) begin
+                    if (check_inlier_control[i].ivalid) begin
+                        check_inlier_control[i].ivalid <= 0;
+                    end
+                end
 
-                if (!check_plane_vars.bus_error_detected && derive_plane_control.status == vector::DERIVE_PLANE_STATUS_SUCCESS && derive_plane_control.ovalid) begin
+                if (!may_request_memory) begin
+                    may_request_memory <= 1;
+                end
+
+                // if the next point is ready and the next check inlier unit is
+                // ready and the next point would be in bounds
+                if (may_request_memory && 
+                    memory_command_ready && 
+                    check_inlier_control[next_inlier_unit].iready && 
+                    memory_command_point_offset + 1 < captured_cloud_length) begin
                     
-                    // capture n and d, move threshold for all check_inlier instances
-                    // don't submit any check_inlier calculations yet since we want to
-                    // continue to the next state where we will already need logic to check
-                    // if the plane has arrived yet.
-                    for (int unsigned i = 0; i < check_inlier_instance_count; i++) begin
-                        check_inlier_control[i].t = check_plane_vars.threshold;
-                        check_inlier_control[i].n = derive_plane_control.n;
-                        check_inlier_control[i].d = derive_plane_control.d;
-                    end
-
-                    check_plane_vars.plane_n = derive_plane_control.n;
-                    check_plane_vars.plane_d = derive_plane_control.d;
-
-                    check_plane_state = CHECK_PLANE_STATE_ITERATE_OVER_CLOUD;
-                end
-
-                // if there was a bus error (we're still reading at least some of the first point while deriving the plane)
-                // end the calculation here.
-                if (check_plane_vars.bus_error_detected) begin
-                    ovalid = 1;
-                    check_plane_state = CHECK_PLANE_STATE_IDLE;
-                    if (read_duration >= maximum_read_latency) begin
-                        status = ransac::PLANE_CHECKING_UNIT_STATUS_BUS_TIMEOUT;
+                    memory_command_valid <= 1;
+                    memory_command_point_offset <= memory_command_point_offset + 1;
+                    memory_command_point <= MEMORY_POINT_N;
+                    check_inlier_control[next_inlier_unit].ivalid <= 1;
+                    may_request_memory <= 0;
+                    if (next_inlier_unit + 1 == check_inlier_instance_count) begin
+                        next_inlier_unit <= 0;
                     end else begin
-                        status = ransac::PLANE_CHECKING_UNIT_STATUS_BUS_ERROR;
+                        next_inlier_unit <= next_inlier_unit + 1;
                     end
+                end else begin
+                    // don't read the same point twice if it can be avoided.
+                    memory_command_valid <= 0;
                 end
 
-                // if there was a derive plane error, report that
-                if (derive_plane_control.ovalid && derive_plane_control.status != vector::DERIVE_PLANE_STATUS_SUCCESS) begin
-                    ovalid = 1;
-                    check_plane_state = CHECK_PLANE_STATE_IDLE;
-                    status = ransac::PLANE_CHECKING_UNIT_STATUS_DERIVE_PLANE_ERROR;
+                if (tested_count + check_inliers_finished_this_cycle >= captured_cloud_length - 1) begin
+                    calculation_state <= CALCULATION_STATE_IDLE;
+                    plane_n <= found_n;
+                    plane_d <= found_d;
+                    inlier_count <= running_inlier_count;
+                    status <= ransac::PLANE_CHECKING_UNIT_STATUS_SUCCESS;
+                    ovalid <= 1;
                 end
             end
-
-            CHECK_PLANE_STATE_ITERATE_OVER_CLOUD: begin
-
-                // don't accidentally submit a check_inlier calculation, acknowledge any finished calculations
-                for (int unsigned i = 0; i < check_inlier_instance_count; i++) begin
-                    check_inlier_control[i].ivalid = 0;
-                    check_inlier_control[i].oacknowledge = 1;
-
-                    if (check_inlier_control[i].ovalid && check_inlier_control[i].inlier) begin
-                        check_plane_vars.inliers++;
-                    end
-                end
-
-                // only process things on this cycle if we've gotten the next point
-                // any can submit a new calculation
-                if (check_plane_vars.received_next_point && check_plane_vars.any_check_inlier_instances_ready) begin
-                    check_inlier_control[check_plane_vars.first_ready_check_inlier_instance].p.v.x = memory_variable[MEMORY_VARIABLE_NEXT_POINT_X_PART].memory_value.value;
-                    check_inlier_control[check_plane_vars.first_ready_check_inlier_instance].p.v.y = memory_variable[MEMORY_VARIABLE_NEXT_POINT_Y_PART].memory_value.value;
-                    check_inlier_control[check_plane_vars.first_ready_check_inlier_instance].p.v.z = memory_variable[MEMORY_VARIABLE_NEXT_POINT_Z_PART].memory_value.value;
-
-                    // begin reading the next point if there is one to read.
-                    // do the calculation in this (kind of strange) order to
-                    // ensure that if max_cloud_length is near a power of 2 and 
-                    // cloud_length is near the max that next_point_offset never overflows.
-                    if (3 * check_plane_vars.cloud_length != check_plane_vars.next_point_offset + 3) begin
-                        check_plane_vars.next_point_offset += 3;
-                                    
-                        check_inlier_control[check_plane_vars.first_ready_check_inlier_instance].ivalid = 1;
-                        check_plane_vars.active_check_inlier_units[check_plane_vars.first_ready_check_inlier_instance] = 1;
-
-                        for (int unsigned i = 0; i < 3; i++) begin
-                            memory_variable[i + max_plane_point_index].offset = check_plane_vars.next_point_offset + i;
-                            memory_variable[i + max_plane_point_index].requests.unread = 1;
-                        end
-                    end else begin
-                        // if no new points to submit (at this point in the logic), 
-                        // that means we're waiting on the last few points to finish the calculation
-                        // we're finished iff all check_inlier instances have finished the calculation
-                        if (check_plane_vars.active_check_inlier_units == '0) begin
-                            status = ransac::PLANE_CHECKING_UNIT_STATUS_SUCCESS;
-                            ovalid = '1;
-                            
-                            check_plane_state = CHECK_PLANE_STATE_IDLE;
-                        end
-
-                        // // force no new calculations when waiting for the last one.
-                        // for (int i = 0; i < check_inlier_instance_count; i++) begin
-                        //     check_inlier_control[i].ivalid = 0;
-                        // end
-                    end
-                end
-
-                // check for a bus error, if one occurred, then the
-                // calculation ends here
-                if (check_plane_vars.bus_error_detected) begin
-                    ovalid = '1;
-                    check_plane_state = CHECK_PLANE_STATE_IDLE;
-                    if (read_duration >= maximum_read_latency) begin
-                        status = ransac::PLANE_CHECKING_UNIT_STATUS_BUS_TIMEOUT;
-                    end else begin
-                        status = ransac::PLANE_CHECKING_UNIT_STATUS_BUS_ERROR;
-                    end
-                end
-            end
-
             endcase
-
-        end : main_state_machine
-
-    end : main_logic
-
-    // handle the memory variable logic here
-
-    enum logic [1:0] {
-        MEMORY_READ_STATE_IDLE,
-        MEMORY_READ_STATE_ADDRESS_STAGE,
-        MEMORY_READ_STATE_DATA_STAGE
-    } memory_read_state;
-
-    typedef struct packed {
-        logic out_of_date;
-        logic [3:0] next_variable_to_read;
-    } memory_variable_state_summary_s;
-
-    function automatic memory_variable_state_summary_s summarize_memory_variables(input point_from_memory_s[max_memory_variable_index-1:0] variables);
-        memory_variable_state_summary_s scratchpad;
-        scratchpad.out_of_date = '0;
-        scratchpad.next_variable_to_read = '0;
-        for (int unsigned i = 0; i < max_memory_variable_index; i++) begin
-            if (!scratchpad.out_of_date && variables[i].state == MEMORY_DATA_STATE_UNREAD) begin
-                scratchpad.out_of_date = '1;
-                scratchpad.next_variable_to_read = i;
-            end
         end
-        summarize_memory_variables = scratchpad;
-    endfunction : summarize_memory_variables
-
-    memory_variable_state_summary_s current_memory_summary;
-
-    logic [3:0] currently_reading;
-
-    always @(posedge clock) begin : handle_memory_bus
-
-        for (int unsigned i = 0; i < max_memory_variable_index; i++) begin
-            memory_variable[i].requests.accept = 0;
-            memory_variable[i].requests.error = 0;
-            memory_variable[i].requests.finish = 0;
-        end
-
-        if (reset == reset_polarity) begin : memory_bus_reset
-            // not our job to reset the memory variable offsets
-            // but it is our job to reset the read state and 
-            // read values.
-            memory_read_state = MEMORY_READ_STATE_IDLE;
-            for (int unsigned i = 0; i < max_memory_variable_index; i++) begin
-                memory_variable[i].memory_value.raw_bits = '0;
-            end
-
-            currently_reading = '0;
-            // no valid address, cannot accept data
-            point_addr_valid = '0;
-            point_data_ready = '0;
-        end : memory_bus_reset
-        else begin : memory_bus_state_machine
-
-            case (memory_read_state)
-            
-            MEMORY_READ_STATE_IDLE: begin
-                point_addr_valid = 0;
-                point_data_ready = 0;
-
-                current_memory_summary = summarize_memory_variables(memory_variable);
-
-                if (current_memory_summary.out_of_date) begin
-                    currently_reading = current_memory_summary.next_variable_to_read;
-                    memory_variable[currently_reading].requests.accept = 1;
-                    point_addr = memory_variable[currently_reading].offset * (vector::bits_in_single / 8);
-                    point_addr_valid = 1;
-                    memory_read_state = MEMORY_READ_STATE_ADDRESS_STAGE;
-                    read_duration = 0;
-                end
-            end
-
-            MEMORY_READ_STATE_ADDRESS_STAGE: begin
-                read_duration++;
-                if (point_addr_ready) begin
-                    point_addr_valid = 0;
-                    point_data_ready = 1;
-                    memory_variable[currently_reading].memory_value.raw_bits = point_data;
-                    memory_read_state = MEMORY_READ_STATE_DATA_STAGE;
-                end
-
-                if (read_duration >= maximum_read_latency) begin
-                    point_addr_valid = 0;
-                    point_data_ready = 0;
-                    memory_read_state = MEMORY_READ_STATE_IDLE;
-                    memory_variable[currently_reading].requests.error = 1;
-                end
-            end
-
-            MEMORY_READ_STATE_DATA_STAGE: begin
-                read_duration++;
-
-                if (point_data_valid && point_resp != ransac::AXI_RESP_OKAY) begin
-                    point_addr_valid = 0;
-                    point_data_ready = 0;
-                    memory_read_state = MEMORY_READ_STATE_IDLE;
-                    memory_variable[currently_reading].requests.error = 1;
-                end
-
-                else if (read_duration >= maximum_read_latency) begin
-                    point_addr_valid = 0;
-                    point_data_ready = 0;
-                    memory_read_state = MEMORY_READ_STATE_IDLE;
-                    memory_variable[currently_reading].requests.error = 1;
-                end
-
-                else if (point_data_valid) begin
-                    read_duration = 0;
-                    point_addr_valid = 0;
-                    point_data_ready = 0;
-                    memory_variable[currently_reading].memory_value.raw_bits = point_data;
-                    memory_variable[currently_reading].requests.finish = 1;
-
-                    // if another point is pending, immediately go to the address stage
-                    current_memory_summary = summarize_memory_variables(memory_variable);
-
-                    if (current_memory_summary.out_of_date) begin
-                        currently_reading = current_memory_summary.next_variable_to_read;
-                        memory_variable[currently_reading].requests.accept = 1;
-                        point_addr = memory_variable[currently_reading].offset * (vector::bits_in_single / 8);
-                        point_addr_valid = 1;
-                        memory_read_state = MEMORY_READ_STATE_ADDRESS_STAGE;
-                    end else begin
-                        memory_read_state = MEMORY_READ_STATE_IDLE;
-                    end
-                end
-
-                
-
-            end
-
-            endcase
-            
-        end : memory_bus_state_machine
-    end : handle_memory_bus
+    end
 
     // instantiate internal modules here
 
@@ -699,45 +657,5 @@ module plane_checking_unit#(
         end
     endgenerate
 
-    // logic to update the states for each memory variable
-    generate
-        for (i = 0; i < max_memory_variable_index; i++) begin
-            always @(posedge clock) begin
-                if (reset == reset_polarity || memory_variable[i].requests.reset) begin
-                    memory_variable[i].state = MEMORY_DATA_STATE_KEEP_UNREAD;
-                end 
-                else begin
-                    (* complete_case *)
-                    case (memory_variable[i].state) 
-                    MEMORY_DATA_STATE_ERROR: begin
-                        // only changes with reset signal
-                    end
-                    MEMORY_DATA_STATE_KEEP_UNREAD: begin
-                        if (memory_variable[i].requests.unread) begin
-                            memory_variable[i].state = MEMORY_DATA_STATE_UNREAD;
-                        end
-                    end
-                    MEMORY_DATA_STATE_READ: begin
-                        if (memory_variable[i].requests.unread) begin
-                            memory_variable[i].state = MEMORY_DATA_STATE_UNREAD;
-                        end
-                    end
-                    MEMORY_DATA_STATE_READING: begin
-                        if (memory_variable[i].requests.error) begin
-                            memory_variable[i].state = MEMORY_DATA_STATE_ERROR;
-                        end else if (memory_variable[i].requests.finish) begin
-                            memory_variable[i].state = MEMORY_DATA_STATE_READ;
-                        end
-                    end
-                    MEMORY_DATA_STATE_UNREAD: begin
-                        if (memory_variable[i].requests.accept) begin
-                            memory_variable[i].state = MEMORY_DATA_STATE_READING;
-                        end
-                    end
-                    endcase
-                end
-            end
-        end
-    endgenerate
 
 endmodule : plane_checking_unit

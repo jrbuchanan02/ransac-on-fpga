@@ -309,7 +309,7 @@ module tb_ransac_unit_simulation;
     ransac_unit_wrapper#(
         .control_addr_base(ransac_control_base_addr),
         .plane_check_unit_count(1),
-        .check_inlier_units_per_plane_check_unit(4)
+        .check_inlier_units_per_plane_check_unit(6)
     ) ransac_under_test(
         .clock(ransac_clock),
         .reset(ransac_reset),
