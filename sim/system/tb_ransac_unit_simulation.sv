@@ -216,35 +216,35 @@ module tb_ransac_unit_simulation;
 
         // read the waveform results.
         @(negedge ransac_clock) begin
-            ransac_control_araddr = ransac_control_base_addr + 20; // inlier count.
+            ransac_control_araddr = ransac_control_base_addr + 32; // inlier count.
         end
         while (!ransac_control_rvalid) begin
             @(posedge ransac_clock);
         end
         $display("Inlier count: %d", ransac_control_rdata);
         @(negedge ransac_clock) begin
-            ransac_control_araddr = ransac_control_base_addr + 24;  // x component of ground plane normal.
+            ransac_control_araddr = ransac_control_base_addr + 36;  // x component of ground plane normal.
         end
         while (!ransac_control_rvalid) begin
             @(posedge ransac_clock);
         end
         $display("Plane Normal X component: %x", ransac_control_rdata);
         @(negedge ransac_clock) begin
-            ransac_control_araddr = ransac_control_base_addr + 28;  // y component of ground plane normal.
+            ransac_control_araddr = ransac_control_base_addr + 40;  // y component of ground plane normal.
         end
         while (!ransac_control_rvalid) begin
             @(posedge ransac_clock);
         end
         $display("Plane Normal Y component: %x", ransac_control_rdata);
         @(negedge ransac_clock) begin
-            ransac_control_araddr = ransac_control_base_addr + 32;  // z component of ground plane normal.
+            ransac_control_araddr = ransac_control_base_addr + 44;  // z component of ground plane normal.
         end
         while (!ransac_control_rvalid) begin
             @(posedge ransac_clock);
         end
         $display("Plane Normal Z component: %x", ransac_control_rdata);
         @(negedge ransac_clock) begin
-            ransac_control_araddr = ransac_control_base_addr + 36;  // distance from plane to origin
+            ransac_control_araddr = ransac_control_base_addr + 48;  // distance from plane to origin
         end
         while (!ransac_control_rvalid) begin
             @(posedge ransac_clock);

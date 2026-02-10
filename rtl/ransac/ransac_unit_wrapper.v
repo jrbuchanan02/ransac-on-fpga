@@ -9,13 +9,13 @@ module ransac_unit_wrapper#(
     parameter integer memory_addr_width = 32,
     parameter integer memory_data_width = 32,   // keep this value synced up with
                                                 // vector::bits_in_single
-    parameter integer memory_maximum_latency = 1 << 10,
-    parameter integer maximum_point_count = 1 << 20,
-    parameter integer maximum_iteration_count = 1 << 20,
+    parameter integer memory_maximum_latency = 1024,
+    parameter integer maximum_point_count = 1048576,
+    parameter integer maximum_iteration_count = 1048576,
     parameter reg [31:0] memory_rid_base = 32'h0000_0000,
     parameter integer control_addr_width = 32,
     parameter integer control_data_width = 32,
-    parameter integer plane_check_unit_count = 2,
+    parameter integer plane_check_unit_count = 1,
     parameter integer check_inlier_units_per_plane_check_unit = 2,
     parameter integer small_fma_latency = 4,
     parameter integer large_fma_latency = 16,

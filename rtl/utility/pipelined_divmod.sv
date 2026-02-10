@@ -134,7 +134,7 @@ module pipelined_divmod#(
                 stage[i].meta = metadata_on_reset;
             end
         end else if (pipeline_should_advance) begin
-            for (int unsigned i = 0; i < word_bits; i++) begin
+            for (int signed i = word_bits - 1; i >= 0; i--) begin
                 stage[i].quotient = stage[i - 1].quotient;
                 stage[i].remainder = stage[i - 1].remainder;
                 stage[i].numerator = stage[i - 1].numerator;

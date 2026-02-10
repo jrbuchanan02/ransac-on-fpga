@@ -163,7 +163,7 @@ module plane_checking_unit#(
             point_addr_valid <= '0;
             point_data_ready <= '0;
             port_state <= PORT_STATE_IDLE;
-            memory_port_pending_destination <= '0;
+            memory_port_pending_destination <= MEMORY_VARIABLE_AX;
         end else begin
             case (port_state)
             PORT_STATE_IDLE: begin
@@ -236,15 +236,15 @@ module plane_checking_unit#(
     always_ff @(posedge clock) begin
         if (reset == reset_polarity) begin
             memory_port_request_valid <= '0;
-            memory_port_destination <= '0;
+            memory_port_destination <= MEMORY_VARIABLE_AX;
             memory_port_addr <= '0;
             memory_command_ready <= '1;
             memory_command_x_addr <= '0;
             memory_command_y_addr <= '0;
             memory_command_z_addr <= '0;
-            memory_command_x_dest <= '0;
-            memory_command_y_dest <= '0;
-            memory_command_z_dest <= '0;
+            memory_command_x_dest <= MEMORY_VARIABLE_AX;
+            memory_command_y_dest <= MEMORY_VARIABLE_AY;
+            memory_command_z_dest <= MEMORY_VARIABLE_AZ;
             memory_controller_state <= MEMORY_CONTROLLER_IDLE;
         end else begin
             case (memory_controller_state)
@@ -452,7 +452,7 @@ module plane_checking_unit#(
             plane_d <= '0;
             memory_command_valid <= '0;
             memory_command_point_offset <= '0;
-            memory_command_point <= '0;
+            memory_command_point <= MEMORY_POINT_A;
             derive_plane_control.ivalid <= '0;
             for (int unsigned i = 0; i < check_inlier_instance_count; i++) begin
                 check_inlier_control[i].ivalid <= 0;
