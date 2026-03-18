@@ -55,6 +55,9 @@
  *              point on the plane P, and this value D, the equation N dot P = D
  *              holds true. Separately, D = distance from the origin to the
  *              point on the plane closest to the origin.
+ * - cycles elapsed during processing (read only) -> resets to zero when 
+ *              starting a calculation and indicates the number of cycles which
+ *              the calculation has taken (so far).
  */
 module ransac_unit#(
     parameter int unsigned memory_addr_width = 32,
@@ -227,6 +230,8 @@ module ransac_unit#(
         // more iterations than this number)
         logic [bits_for_memory_var_requested_iterations-1:0] requested_iterations;
         logic [bits_for_memory_var_processed_iterations-1:0] processed_iterations;
+
+        logic [control_data_width-1:0] cycles_elapsed;
     } memory_vars_s;
 
     memory_vars_s memory_vars;
@@ -272,8 +277,6 @@ module ransac_unit#(
         logic [plane_check_unit_count-1:0] [31:0] scoreboard;
         logic [plane_check_unit_count-1:0] units_pending_read;
         logic [(plane_check_unit_count == 1 ? 0 : ($clog2(plane_check_unit_count)-1)):0] smallest_score_pending_read;
-        logic [(plane_check_unit_count == 1 ? 0 : ($clog2(plane_check_unit_count)-1)):0] servicing_addr_for_unit;
-        logic [(plane_check_unit_count == 1 ? 0 : ($clog2(plane_check_unit_count)-1)):0] transactions_in_flight;
 
         logic decrement_other_scores_on_service;
     } cloud_read_control;
@@ -309,85 +312,73 @@ module ransac_unit#(
             end
         end
 
-        // always ready for read data (could perhaps cause issues if data not
-        // always valid?)
-        memory_rready <= '1;
-
-        // handle read data valid signals
-        if (memory_rvalid && memory_rready) begin
-            // determine the matching plane checking unit based on the ID.
-            for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
-                if (memory_rid == memory_rid_base + i) begin
-                    plane_checking_unit_port[i].point_data_valid = '1;
-                end else begin
-                    plane_checking_unit_port[i].point_data_valid = 0;
-                end
-            end
-        end else begin
-            for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
-                plane_checking_unit_port[i].point_data_valid = '0;
-            end
-        end
+        // always ready for read data.
+        // pedantically, the AMBA specification allows this behavior in that a 
+        // manager (agent making transactions) is explicitly allowed to bring 
+        // rready high before rvalid is high and not forbidden from bringing
+        // rready high before starting a transaction.
+        memory_rready = '1;
+        
     end
 
-    always @(posedge clock) begin
+    always_ff @(posedge clock) begin
         if (reset == reset_polarity) begin
             cloud_read_addr_state <= CLOUD_READ_ADDR_IDLE;
             for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
-                cloud_read_control.scoreboard[i] = 0;
+                cloud_read_control.scoreboard[i] <= 0;
+                plane_checking_unit_port[i].point_addr_ready <= '0;
             end
-            cloud_read_control.transactions_in_flight = '0;
+            memory_araddr <= '0;
+            memory_arvalid <= '0;
+            memory_arid <= '0;
         end else begin
-            for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
-                plane_checking_unit_port[i].point_addr_ready = 0;
-                plane_checking_unit_port[i].point_data = memory_rdata;
-                plane_checking_unit_port[i].point_resp = memory_rresp;
-            end
+
             case (cloud_read_addr_state)
             CLOUD_READ_ADDR_IDLE: begin
-
                 if (cloud_read_control.units_pending_read != '0) begin
-                    cloud_read_control.servicing_addr_for_unit = cloud_read_control.smallest_score_pending_read;
-                    memory_araddr <= plane_checking_unit_port[cloud_read_control.servicing_addr_for_unit].point_addr + memory_vars.cloud_base;
+                    memory_araddr <= plane_checking_unit_port[cloud_read_control.smallest_score_pending_read].point_addr + memory_vars.cloud_base;
                     memory_arvalid <= '1;
-                    memory_arid <= memory_rid_base + cloud_read_control.servicing_addr_for_unit;
+                    memory_arid <= cloud_read_control.smallest_score_pending_read + memory_rid_base;
+                    // address is registered at this point so the unit is technically free to request another address.
+                    plane_checking_unit_port[cloud_read_control.smallest_score_pending_read].point_addr_ready <= '1;
                     cloud_read_addr_state <= CLOUD_READ_ADDR_WAIT;
-                end else begin
-                    memory_arvalid <= '0;
                 end
             end
-
             CLOUD_READ_ADDR_WAIT: begin
-
+                // just zero out all port addr ready signals even though only
+                // the one at index memory_arid - memory_rid_base should have
+                // that signal asserted.
+                for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
+                    plane_checking_unit_port[i].point_addr_ready <= '0;
+                end
+                // memory_arvalid should always be 1 at this point but Vivado
+                // should be able to trivially make this optimization.
                 if (memory_arready && memory_arvalid) begin
-                    plane_checking_unit_port[cloud_read_control.servicing_addr_for_unit].point_addr_ready = '1;
-                    // if we would switch to the wait state if we were idle, run the
-                    // logic for the idle state here.
-
-                    if (cloud_read_control.units_pending_read != '0) begin
-                        cloud_read_control.servicing_addr_for_unit = cloud_read_control.smallest_score_pending_read;
-                        memory_araddr <= plane_checking_unit_port[cloud_read_control.servicing_addr_for_unit].point_addr + memory_vars.cloud_base;
-                        memory_arvalid <= '1;
-                        memory_arid <= memory_rid_base + cloud_read_control.servicing_addr_for_unit;
-                        cloud_read_addr_state <= CLOUD_READ_ADDR_WAIT;
-                    end else begin
-                        memory_arvalid <= '0;
-                        cloud_read_addr_state <= CLOUD_READ_ADDR_IDLE;
-                    end
-
-
-                    
-                    if (cloud_read_control.decrement_other_scores_on_service) begin
-                        for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
-                            cloud_read_control.scoreboard[i] = cloud_read_control.scoreboard[i] - 1;
-                        end
-                    end
-                    cloud_read_control.scoreboard[cloud_read_control.servicing_addr_for_unit] = cloud_read_control.scoreboard[cloud_read_control.servicing_addr_for_unit] + 1; 
+                    memory_arvalid <= '0;
+                    cloud_read_addr_state <= CLOUD_READ_ADDR_IDLE;
+                end
+            end
+            endcase
+            // memory_rready is driven by a constant 1 but Vivado should be able
+            // to trivially make this optimization.
+            if (memory_rvalid && memory_rready) begin
+                plane_checking_unit_port[memory_rid - memory_rid_base].point_data <= memory_rdata;
+                plane_checking_unit_port[memory_rid - memory_rid_base].point_data_valid <= '1;
+            end else /*if !memory_rvalid*/ begin
+                for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
+                    plane_checking_unit_port[i].point_data_valid <= '0;
                 end
             end
 
-            endcase
-
+            // update the scoreboard.
+            for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
+                // if decrementing other scores on service -> subtract 1 from all but
+                // the unit serviced (because + 1 then - 1 cancels out)
+                //
+                // if not decrementing other scores on service -> increment the 
+                // serviced score (because it will be a + 1 for only that scoreboard entry)
+                cloud_read_control.scoreboard[i] <= cloud_read_control.scoreboard[i] + plane_checking_unit_port[i].point_addr_ready - cloud_read_control.decrement_other_scores_on_service;
+            end
         end
     end
 
@@ -432,7 +423,7 @@ module ransac_unit#(
         // assign offsets to the plane checking unit port
         for (int unsigned i = 0; i < plane_check_unit_count; i++) begin
             for (int unsigned j = 0; j < 3; j++) begin
-                plane_checking_unit_port[i].plane_point_start_offsets[j] <= plane_point_offset_control.offset[3 * i + j];
+                plane_checking_unit_port[i].plane_point_start_offsets[j] = plane_point_offset_control.offset[3 * i + j];
             end
         end
 
@@ -632,6 +623,8 @@ module ransac_unit#(
             ransac_control.pending_iterations <= '0;
             ransac_control.response_to_control.ransac_process_about_to_finish <= '0;
 
+            memory_vars.cycles_elapsed <= '0;
+
         end : handle_reset
         else begin : state_machine_logic
             case (ransac_state)
@@ -655,6 +648,8 @@ module ransac_unit#(
                     ransac_control.best_plane.inlier_count <= '0;
                     ransac_control.best_plane.plane_n <= '0;
                     ransac_control.best_plane.plane_d <= '0;
+
+                    memory_vars.cycles_elapsed <= '0;
                 end else begin
                     ransac_state <= RANSAC_STATE_IDLE;
                     ransac_control.response_to_control.ransac_process_active <= '0;
@@ -668,6 +663,8 @@ module ransac_unit#(
                 // even if request to abort on this cycle, the calculation is 
                 // still running.
                 ransac_control.response_to_control.ransac_process_active <= '1;
+
+                memory_vars.cycles_elapsed <= memory_vars.cycles_elapsed + 1;
                 
                 // if any units finished calculations on this cycle, remember
                 // the better of the current record and the potential new record.
@@ -723,6 +720,8 @@ module ransac_unit#(
                     plane_checking_unit_port[i].ivalid <= '0;
                 end
 
+                memory_vars.cycles_elapsed <= memory_vars.cycles_elapsed + 1;
+
                 // all units finished.
                 if (ransac_control.unit_state.iready_state == '1) begin
                     ransac_control.response_to_control.ransac_process_active <= '0;
@@ -755,8 +754,10 @@ module ransac_unit#(
                     ransac_state <= RANSAC_STATE_FINAL_GROUP_WAIT;
                 end
 
+                memory_vars.cycles_elapsed <= memory_vars.cycles_elapsed + 1;
+
                 ransac_control.response_to_control.ransac_process_stopping <= '0;
-                ransac_control.pending_iterations <= ransac_control.next_pending_iterations;
+                ransac_control.pending_iterations <= ransac_control.pending_iterations + ransac_control.next_pending_iterations;
             end
             endcase
         end : state_machine_logic
@@ -804,6 +805,7 @@ module ransac_unit#(
         CONTROL_PORT_GROUND_PLANE_NY,
         CONTROL_PORT_GROUND_PLANE_NZ,
         CONTROL_PORT_GROUND_PLANE_D,
+        CONTROL_PORT_CYCLES_ELAPSED,
         CONTROL_PORT_NO_FIELD
     } control_port_field_e;
 
@@ -818,141 +820,6 @@ module ransac_unit#(
         control_port_field_e field;
         logic write_allowed;
     } control_axi_write_vars;
-
-    // // size of a field given its id
-    // localparam int unsigned control_field_size[0:13] = '{
-    //     1,
-    //     1,
-    //     1,
-    //     $bits(memory_vars.cloud_base) / control_data_width,
-    //     $bits(memory_vars.cloud_length) / control_data_width,
-    //     $bits(memory_vars.requested_iterations) / control_data_width,
-    //     $bits(memory_vars.processed_iterations) / control_data_width,
-    //     word_aligned_width(vector::bits_in_single) / control_data_width,
-    //     $bits(memory_vars.derived_plane_inlier_count) / control_data_width,
-    //     word_aligned_width(vector::bits_in_single) / control_data_width,
-    //     word_aligned_width(vector::bits_in_single) / control_data_width,
-    //     word_aligned_width(vector::bits_in_single) / control_data_width,
-    //     word_aligned_width(vector::bits_in_single) / control_data_width,
-    //     0
-    // }; 
-
-    // localparam control_port_field_e[0:13] previous_control_field = '{
-    //     CONTROL_PORT_CALCULATION_START,
-    //     CONTROL_PORT_CALCULATION_START,
-    //     CONTROL_PORT_CALCULATION_ABORT,
-    //     CONTROL_PORT_CALCULATION_STATE,
-    //     CONTROL_PORT_CLOUD_BASE,
-    //     CONTROL_PORT_CLOUD_SIZE,
-    //     CONTROL_PORT_REQUESTED_ITERATIONS,
-    //     CONTROL_PORT_PROCESSED_ITERATIONS,
-    //     CONTROL_PORT_INLIER_THRESHOLD,
-    //     CONTROL_PORT_GROUND_PLANE_INLIER_COUNT,
-    //     CONTROL_PORT_GROUND_PLANE_NX,
-    //     CONTROL_PORT_GROUND_PLANE_NY,
-    //     CONTROL_PORT_GROUND_PLANE_NZ,
-    //     CONTROL_PORT_NO_FIELD
-    // };
-
-    // // keep this up to date with the previous control field function.
-    // localparam control_port_field_e highest_offset_field = CONTROL_PORT_GROUND_PLANE_D;
-    // // keep this up to date with the previous control field function
-    // localparam control_port_field_e lowest_offset_field = CONTROL_PORT_CALCULATION_START;
-
-    // localparam logic [0:13][control_addr_width-1:0] control_field_offset = '{
-    //     0,  // start
-    //     1,  // abort
-    //     2,  // state
-    //     3,  // base
-    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE],    // size
-    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE], // req iterations
-    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
-    //         control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS], // proc iterations
-    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
-    //         control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
-    //         control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS], // inlier threshold
-    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
-    //         control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
-    //         control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
-    //         1 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],    // inlier count
-    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
-    //         control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
-    //         control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
-    //         control_field_size[CONTROL_PORT_GROUND_PLANE_INLIER_COUNT] + 
-    //         1 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],     // normal x
-    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
-    //         control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
-    //         control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
-    //         control_field_size[CONTROL_PORT_GROUND_PLANE_INLIER_COUNT] + 
-    //         2 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],     // normal y
-    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
-    //         control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
-    //         control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
-    //         control_field_size[CONTROL_PORT_GROUND_PLANE_INLIER_COUNT] + 
-    //         3 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],     // normal z
-    //     3 + control_field_size[CONTROL_PORT_CLOUD_BASE] + control_field_size[CONTROL_PORT_CLOUD_SIZE] + 
-    //         control_field_size[CONTROL_PORT_REQUESTED_ITERATIONS] + 
-    //         control_field_size[CONTROL_PORT_PROCESSED_ITERATIONS] +
-    //         control_field_size[CONTROL_PORT_GROUND_PLANE_INLIER_COUNT] + 
-    //         4 * control_field_size[CONTROL_PORT_INLIER_THRESHOLD],     // distance
-    //     '1    // no field
-    // };
-
-    // // given a field, determine its offset
-    // // the field which lists itself as the previous control field is considered 
-    // // to be the first in memory. Other field positions determined by recursively
-    // // calling this function on the previous field.
-    // function static logic [control_addr_width-1:0] control_field_offset(input control_port_field_e field);
-    // begin
-    //     if (field == lowest_offset_field) begin
-    //         control_field_offset = '0;
-    //     end else if (previous_control_field[field] == lowest_offset_field) begin
-    //         control_field_offset = control_field_size[lowest_offset_field];
-    //     end else begin
-    //         control_field_offset = control_field_offset(previous_control_field[field]) + control_field_size[previous_control_field[field]];
-    //     end
-    // end
-    // endfunction : control_field_offset
-
-    // using the above functions, determine if an address is in the range of 
-    // addresses given to the provided field.
-    // 
-    // this condition occurs when address - base_address >= control_field_offset(field)
-    // but less than control_field_offset + control_field_size
-    // function automatic bit address_refers_to_field(input logic [control_addr_width-1:0] addr, input control_port_field_e field);
-    //     bit above_minimum;
-    //     bit below_maximum;
-    // begin
-    //     if (addr >= control_field_offset[field] + control_addr_base) begin
-    //         above_minimum = '1;
-    //     end else begin
-    //         above_minimum = '0;
-    //     end
-
-    //     if (addr < control_field_offset[field] + control_addr_base + control_field_size[field]) begin
-    //         below_maximum = '1;
-    //     end else begin
-    //         below_maximum = '0;
-    //     end
-
-    //     address_refers_to_field = above_minimum & below_maximum;
-    // end
-    // endfunction : address_refers_to_field
-
-    // function automatic control_port_field_e partial_address_lookup(input logic [control_addr_width-1:0] addr, input control_port_field_e starting_field);
-    // begin
-    //     // if the first field to look at matches, then lookup is complete
-    //     if (address_refers_to_field(addr, starting_field)) begin
-    //         partial_address_lookup = starting_field;
-    //     // otherwise, if there is no previous field, then no field matches
-    //     end else if (starting_field == lowest_offset_field || starting_field == CONTROL_PORT_NO_FIELD) begin
-    //         partial_address_lookup = CONTROL_PORT_NO_FIELD;
-    //     end else begin
-    //     // otherwise, check the previous field to see if it matches.
-    //         partial_address_lookup = partial_address_lookup(addr, previous_control_field[starting_field]);
-    //     end
-    // end
-    // endfunction : partial_address_lookup
 
     function automatic control_port_field_e address_to_field(input logic [control_addr_width-1:0] addr);
     begin
@@ -970,6 +837,7 @@ module ransac_unit#(
         10: address_to_field = CONTROL_PORT_GROUND_PLANE_NY;
         11: address_to_field = CONTROL_PORT_GROUND_PLANE_NZ;
         12: address_to_field = CONTROL_PORT_GROUND_PLANE_D;
+        13: address_to_field = CONTROL_PORT_CYCLES_ELAPSED;
         default: address_to_field = CONTROL_PORT_NO_FIELD;
         endcase
     end
@@ -1005,6 +873,7 @@ module ransac_unit#(
         CONTROL_PORT_GROUND_PLANE_NY,
         CONTROL_PORT_GROUND_PLANE_NZ,
         CONTROL_PORT_GROUND_PLANE_D,
+        CONTROL_PORT_CYCLES_ELAPSED,
         CONTROL_PORT_NO_FIELD: field_write_allowed = '0;
         // write allowed if not currently running
         CONTROL_PORT_CLOUD_BASE,
@@ -1045,25 +914,24 @@ module ransac_unit#(
             read_control_data = memory_vars.derived_plane_inlier_count[control_data_width - 1 + control_data_width * field_offset-:control_data_width];
         end
         CONTROL_PORT_GROUND_PLANE_NX: begin
-            read_control_data = memory_vars.derived_plane_normal[0][control_data_width - 1 + control_data_width * field_offset-:control_data_width];
+            read_control_data = memory_vars.derived_plane_normal[2];
         end
         CONTROL_PORT_GROUND_PLANE_NY: begin
-            read_control_data = memory_vars.derived_plane_normal[1][control_data_width - 1 + control_data_width * field_offset-:control_data_width];
+            read_control_data = memory_vars.derived_plane_normal[1];
         end
         CONTROL_PORT_GROUND_PLANE_NZ: begin
-            read_control_data = memory_vars.derived_plane_normal[2][control_data_width - 1 + control_data_width * field_offset-:control_data_width];
+            read_control_data = memory_vars.derived_plane_normal[0];
         end
         CONTROL_PORT_GROUND_PLANE_D: begin
-            read_control_data = memory_vars.derived_plane_distance[control_data_width - 1 + control_data_width * field_offset-:control_data_width];
+            read_control_data = memory_vars.derived_plane_distance;
+        end
+        CONTROL_PORT_CYCLES_ELAPSED: begin
+            read_control_data = memory_vars.cycles_elapsed;
         end
         default: read_control_data = '0;
         endcase
     end
     endfunction : read_control_data
-
-    always_comb begin : control_axi_reveal_statistics
-
-    end : control_axi_reveal_statistics
 
     always_comb begin : control_axi_decode
         control_axi_read_vars.field = address_to_field(control_araddr - control_addr_base);
@@ -1220,6 +1088,8 @@ module ransac_unit#(
         memory_wstrb = '0;
         memory_wdata = '0;
         memory_bready = '0;
+        memory_awid = '0;
+        memory_wid = '0;
     end
 
     genvar i;
